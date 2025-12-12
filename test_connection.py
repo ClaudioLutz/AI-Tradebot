@@ -119,10 +119,7 @@ def test_client_endpoint(client):
         return True
     except SaxoAuthenticationError as e:
         print(f"✗ Authentication failed: {e}")
-        print("\n  Possible causes:")
-        print("  - Token has expired (24-hour limit)")
-        print("  - Token is invalid")
-        print("  - Generate new token at https://developer.saxobank.com")
+        # Error details are now included in the exception message from saxo_client.py
         return False
     except SaxoAPIError as e:
         print(f"✗ API error: {e}")
@@ -175,6 +172,10 @@ def test_accounts_endpoint(client):
 
 def print_summary(all_passed):
     """Print test summary."""
+    load_dotenv()
+    token = os.getenv("SAXO_ACCESS_TOKEN")
+    using_manual_token = token is not None and token.strip() != ""
+    
     print("\n" + "=" * 60)
     if all_passed:
         print("✓ ALL TESTS PASSED - Saxo API Connection Successful!")
@@ -183,10 +184,20 @@ def print_summary(all_passed):
     else:
         print("✗ SOME TESTS FAILED - Please Review Errors Above")
         print("\nCommon solutions:")
-        print("  1. Regenerate 24h token at https://developer.saxobank.com")
-        print("  2. Update .env with new token")
-        print("  3. Run: python verify_env.py")
-        print("  4. Retry: python test_connection.py")
+        if using_manual_token:
+            print("  Manual Token Mode:")
+            print("  1. Regenerate 24h token at https://developer.saxobank.com")
+            print("  2. Update SAXO_ACCESS_TOKEN in .env")
+            print("  3. Run: python verify_env.py")
+            print("  4. Retry: python test_connection.py")
+        else:
+            print("  OAuth Mode:")
+            print("  1. Run: python scripts/saxo_login.py")
+            print("  2. Complete browser authentication flow")
+            print("  3. Retry: python test_connection.py")
+            print("\n  Alternative (Manual Token Mode):")
+            print("  1. Get 24h token at https://developer.saxobank.com")
+            print("  2. Set SAXO_ACCESS_TOKEN in .env")
     print("=" * 60)
 
 

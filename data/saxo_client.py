@@ -222,9 +222,23 @@ class SaxoClient:
         
         # Handle authentication errors
         if status_code in [401, 403]:
+            # Check which authentication mode is being used
+            token = os.getenv("SAXO_ACCESS_TOKEN")
+            using_manual_token = token is not None and token.strip() != ""
+            
+            if using_manual_token:
+                auth_help = (
+                    "Token may be expired (24h limit). "
+                    "Generate a new token at https://developer.saxobank.com and update SAXO_ACCESS_TOKEN in .env"
+                )
+            else:
+                auth_help = (
+                    "OAuth token may be invalid or expired. "
+                    "Try running: python scripts/saxo_login.py"
+                )
+            
             raise SaxoAuthenticationError(
-                f"Authentication failed (HTTP {status_code}): {error_msg}. "
-                "Check your SAXO_ACCESS_TOKEN. Token may be expired (24h limit)."
+                f"Authentication failed (HTTP {status_code}): {error_msg}. {auth_help}"
             )
         
         # Handle other errors

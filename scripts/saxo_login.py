@@ -3,7 +3,12 @@ Saxo OpenAPI OAuth Login Script
 Performs one-time interactive login to obtain access and refresh tokens.
 """
 import sys
+from pathlib import Path
 from datetime import datetime
+
+# Add parent directory to path so we can import project modules
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from auth.saxo_oauth import interactive_login
 
 
