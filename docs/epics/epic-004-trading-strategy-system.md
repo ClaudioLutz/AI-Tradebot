@@ -61,6 +61,32 @@ market_data = {
 - Make strategy parameters configurable (e.g., MA periods)
 - Design for easy addition of new strategy files
 - Consider class-based approach for complex strategies with state
+- **Avoid look-ahead bias:** Use only closed bars; never use "future" information (e.g., today's high/low to decide earlier entry)
+- **Timestamp discipline:** All signals must have explicit timestamps; indicators use only data strictly before decision point
+- **Parameter transparency:** Record all parameters; avoid backtest overfitting through excessive parameter experimentation
+
+### Backtesting & Strategy Validation Considerations
+Even though backtesting is out of scope for this epic, the strategy interface must be designed to prevent common pitfalls:
+
+**Look-ahead bias** occurs when strategies inadvertently use future information. Common sources:
+- Using same-bar high/low before bar closes
+- Using end-of-day adjusted prices for intraday decisions
+- Data snooping through parameter optimization
+
+**Prevention measures:**
+- `require_closed=True` flag on bar slicing utilities
+- Explicit bar timestamps in all data structures
+- Crossover detection compares previous vs current state (not just current MA values)
+
+References:
+- Look-ahead bias definition: [Evidence-Based Technical Analysis (Aronson)](https://catalogimages.wiley.com/images/db/pdf/9781118460146.excerpt.pdf)
+- Backtest overfitting: [Bailey et al. - The Probability of Backtest Overfitting](https://carmamaths.org/jon/backtest2.pdf)
+
+**Best practices for future backtesting:**
+- Keep holdout/out-of-sample data separate
+- Record all parameter sets tested
+- Use walk-forward analysis over single-period optimization
+- Document strategy rationale before parameter tuning
 
 ## Dependencies
 - **Epic 001-2:** Saxo Bank Migration (broker connectivity)
@@ -219,7 +245,14 @@ def generate_signals(market_data: Dict[str, Dict]) -> Dict[str, str]:
 ### CryptoFX Notes
 - CryptoFX (e.g., BTCUSD) may exhibit higher volatility
 - Consider wider thresholds or different MA periods
-- 24/7 trading means no weekend gaps in data
+- **IMPORTANT:** Saxo CryptoFX trades **weekdays only** (not 24/7); expect weekend gaps in data
+- Reference: [Saxo Bank Developer Portal - Crypto FX](https://developer.saxobank.com/openapi/learn/crypto-fx-in-openapi)
+
+### Extended Trading Hours
+- US exchanges support pre-market and after-hours trading (extended hours)
+- Extended hours typically have lower liquidity and higher volatility risk
+- Strategies should default to **HOLD** during extended hours unless explicitly enabled
+- Reference: [Saxo Extended Trading Hours](https://www.help.saxo/hc/en-ch/articles/7574076258589-Extended-Trading-Hours)
 
 ## Testing Strategies
 
