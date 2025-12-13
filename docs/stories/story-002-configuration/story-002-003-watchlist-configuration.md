@@ -688,7 +688,7 @@ config.resolve_instruments(force_refresh=True)
 - **Structured Data:** Explicit AssetType + UIC eliminates ambiguity
 - **Lazy Resolution:** UICs resolved on demand, not at initialization
 - **Caching Layer:** Reduces API calls and enables offline operation
-- **Immutable Watchlist:** Load once, resolve once (reload config to change)
+- **Runtime Mutability:** Watchlist loaded from config at startup; `add_instrument()`/`remove_instrument()` methods allow in-memory modifications during runtime (mutations are not persisted to `.env` - reload config to reset to original)
 - **Type Safety:** Validation ensures structured format consistency
 
 ## CryptoFX Transition Handling

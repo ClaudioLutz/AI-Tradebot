@@ -93,45 +93,76 @@ Tests cover:
 import os
 import pytest
 import tempfile
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 from config.config import Config, ConfigurationError, get_config
+
+
+# ==============================================================================
+# BASE ENVIRONMENT FIXTURES
+# ==============================================================================
+# These fixtures ensure tests are deterministic and don't rely on local .env
+
+@pytest.fixture
+def base_manual_env():
+    """
+    Base environment for manual token mode tests.
+    Always use with patch.dict(..., clear=True) for deterministic tests.
+    """
+    return {
+        'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
+        'SAXO_ACCESS_TOKEN': 'test_manual_token_12345678901234567890',
+        'SAXO_ENV': 'SIM',
+        'DRY_RUN': 'True',
+    }
+
+@pytest.fixture
+def base_oauth_env():
+    """
+    Base environment for OAuth mode tests.
+    OAuth mode also requires mocking token file existence.
+    """
+    return {
+        'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
+        'SAXO_APP_KEY': 'test_app_key',
+        'SAXO_APP_SECRET': 'test_app_secret',
+        'SAXO_REDIRECT_URI': 'http://localhost:8080/callback',
+        'SAXO_ENV': 'SIM',
+        'DRY_RUN': 'True',
+    }
 
 
 class TestConfigInitialization:
     """Test configuration initialization and loading."""
     
-    def test_config_initialization_success(self):
-        """Test successful configuration initialization."""
-        config = Config()
-        assert config is not None
-        assert hasattr(config, 'base_url')
-        assert hasattr(config, 'watchlist')
-        assert hasattr(config, 'default_timeframe')
+    def test_config_initialization_success(self, base_manual_env):
+        """Test successful configuration initialization with manual token."""
+        with patch.dict(os.environ, base_manual_env, clear=True):
+            config = Config()
+            assert config is not None
+            assert hasattr(config, 'base_url')
+            assert hasattr(config, 'watchlist')
+            assert hasattr(config, 'default_timeframe')
     
     def test_missing_base_url_raises_error(self):
         """Test that missing SAXO_REST_BASE raises error."""
-        with patch.dict(os.environ, {'SAXO_REST_BASE': ''}, clear=True):
+        with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(ConfigurationError) as exc_info:
                 Config()
             assert "SAXO_REST_BASE" in str(exc_info.value)
     
-    def test_oauth_mode_missing_token_file_raises_error(self):
+    def test_oauth_mode_missing_token_file_raises_error(self, base_oauth_env):
         """Test that OAuth mode without token file raises error."""
-        with patch.dict(os.environ, {
-            'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
-            'SAXO_APP_KEY': 'test_app_key',
-            'SAXO_APP_SECRET': 'test_app_secret',
-            'SAXO_REDIRECT_URI': 'http://localhost:8080/callback'
-        }, clear=True):
-            with pytest.raises(ConfigurationError) as exc_info:
-                Config()
-            assert "token file not found" in str(exc_info.value).lower()
+        with patch.dict(os.environ, base_oauth_env, clear=True):
+            # Don't mock token file existence - it should fail
+            with patch('os.path.exists', return_value=False):
+                with pytest.raises(ConfigurationError) as exc_info:
+                    Config()
+                assert "token file not found" in str(exc_info.value).lower()
     
     def test_manual_mode_missing_token_raises_error(self):
         """Test that manual mode without SAXO_ACCESS_TOKEN raises error."""
         with patch.dict(os.environ, {
             'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
-            'SAXO_ACCESS_TOKEN': ''
         }, clear=True):
             with pytest.raises(ConfigurationError) as exc_info:
                 Config()
@@ -141,63 +172,61 @@ class TestConfigInitialization:
 class TestAuthentication:
     """Test API authentication (OAuth and manual token modes)."""
     
-    def test_oauth_mode_detection(self):
+    def test_oauth_mode_detection(self, base_oauth_env):
         """Test OAuth mode is detected when app credentials present."""
-        with patch.dict(os.environ, {
-            'SAXO_APP_KEY': 'test_app_key',
-            'SAXO_APP_SECRET': 'test_app_secret'
-        }):
-            # Mock token file existence
+        with patch.dict(os.environ, base_oauth_env, clear=True):
+            # Mock token file existence and content
             with patch('os.path.exists', return_value=True):
-                config = Config()
-                assert config.auth_mode == "oauth"
+                with patch('builtins.open', mock_open(read_data='{"access_token": "oauth_test_token"}')):
+                    config = Config()
+                    assert config.auth_mode == "oauth"
     
-    def test_manual_mode_detection(self):
+    def test_manual_mode_detection(self, base_manual_env):
         """Test manual mode is detected when only access token present."""
-        with patch.dict(os.environ, {
-            'SAXO_ACCESS_TOKEN': 'test_token_12345'
-        }, clear=False):
+        with patch.dict(os.environ, base_manual_env, clear=True):
             config = Config()
             assert config.auth_mode == "manual"
     
-    def test_get_access_token_oauth_mode(self):
+    def test_get_access_token_oauth_mode(self, base_oauth_env):
         """Test get_access_token() in OAuth mode."""
-        # Mock OAuth token retrieval
-        with patch('os.path.exists', return_value=True):
-            with patch('builtins.open', mock_open(read_data='{"access_token": "oauth_token"}')):
-                config = Config()
-                if config.auth_mode == "oauth":
-                    token = config.get_access_token()
-                    assert token is not None
+        with patch.dict(os.environ, base_oauth_env, clear=True):
+            # Mock OAuth token retrieval
+            with patch('os.path.exists', return_value=True):
+                with patch('builtins.open', mock_open(read_data='{"access_token": "oauth_token_from_file"}')):
+                    config = Config()
+                    if config.auth_mode == "oauth":
+                        token = config.get_access_token()
+                        assert token is not None
+                        assert len(token) > 0
     
-    def test_get_access_token_manual_mode(self):
+    def test_get_access_token_manual_mode(self, base_manual_env):
         """Test get_access_token() in manual mode."""
-        test_token = "manual_token_12345"
-        with patch.dict(os.environ, {'SAXO_ACCESS_TOKEN': test_token}):
+        with patch.dict(os.environ, base_manual_env, clear=True):
             config = Config()
             if config.auth_mode == "manual":
                 token = config.get_access_token()
-                assert token == test_token
+                assert token == base_manual_env['SAXO_ACCESS_TOKEN']
 
 
 class TestCredentials:
     """Test API credentials loading and handling."""
     
-    def test_base_url_trailing_slash_removed(self):
+    def test_base_url_trailing_slash_removed(self, base_manual_env):
         """Test that trailing slash is removed from base URL."""
-        with patch.dict(os.environ, {
-            'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi/',
-            'SAXO_ACCESS_TOKEN': 'test_token_12345'
-        }):
+        env = base_manual_env.copy()
+        env['SAXO_REST_BASE'] = 'https://gateway.saxobank.com/sim/openapi/'
+        with patch.dict(os.environ, env, clear=True):
             config = Config()
             assert not config.base_url.endswith('/')
     
-    def test_token_masking(self):
+    def test_token_masking(self, base_manual_env):
         """Test that tokens are properly masked."""
-        config = Config()
-        masked = config.get_masked_token()
-        assert '...' in masked
-        assert len(masked) < len(config.access_token)
+        with patch.dict(os.environ, base_manual_env, clear=True):
+            config = Config()
+            masked = config.get_masked_token()
+            token = config.get_access_token()  # Use method, not attribute
+            assert '...' in masked
+            assert len(masked) < len(token)
     
     def test_environment_detection_sim(self):
         """Test SIM environment detection."""
@@ -277,11 +306,18 @@ class TestWatchlist:
         assert len(stocks) + len(fx) > 0
     
     def test_watchlist_summary_structure(self):
-        """Test watchlist summary includes Saxo-specific info."""
+        """Test watchlist summary includes Saxo-specific info with stable schema."""
         config = Config()
         summary = config.get_watchlist_summary()
+        
+        # Required keys per stable schema
         assert 'total_instruments' in summary
-        assert 'resolved_count' in summary or 'instrument_count' in summary
+        assert 'resolved' in summary  # Count of resolved instruments
+        assert 'unresolved' in summary  # Count of unresolved instruments
+        assert 'by_asset_type' in summary  # Breakdown by asset type
+        
+        # Verify counts are consistent
+        assert summary['resolved'] + summary['unresolved'] == summary['total_instruments']
 
 
 class TestTradingSettings:
@@ -373,20 +409,21 @@ class TestTradingSettings:
             assert config.is_trading_allowed(crypto, 22)
     
     def test_trading_hours_instrument_mode(self):
-        """Test trading hours in instrument mode (per-asset)."""
+        """Test trading hours in instrument mode (per-asset) using injectable time."""
         with patch.dict(os.environ, {'TRADING_HOURS_MODE': 'instrument'}):
             config = Config()
             stock = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
             crypto = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
             
-            # Stock uses fixed hours
-            assert config.is_trading_allowed(stock, 15)
-            assert not config.is_trading_allowed(stock, 22)
+            # Stock uses fixed hours (inject hour for deterministic testing)
+            assert config.is_trading_allowed(stock, current_hour=15, current_minute=0)
+            assert not config.is_trading_allowed(stock, current_hour=22, current_minute=0)
             
-            # Crypto uses 24/5 (weekdays only) - mock weekday
-            with patch('datetime.datetime') as mock_dt:
-                mock_dt.utcnow.return_value.weekday.return_value = 2  # Wednesday
-                assert config.is_trading_allowed(crypto, 3)
+            # Crypto uses 24/5 - use injectable current_weekday parameter
+            # Weekday 2 = Wednesday (trading allowed)
+            assert config.is_trading_allowed(crypto, current_hour=3, current_weekday=2)
+            # Weekday 6 = Sunday (trading NOT allowed)
+            assert not config.is_trading_allowed(crypto, current_hour=3, current_weekday=6)
     
     def test_trading_settings_summary(self):
         """Test trading settings summary (Saxo-specific)."""
@@ -407,12 +444,12 @@ class TestValidation:
         config = Config()
         assert config.is_valid()
     
-    def test_invalid_position_sizing_fails(self):
+    def test_invalid_position_sizing_fails(self, base_manual_env):
         """Test that invalid position sizing fails validation."""
-        with patch.dict(os.environ, {
-            'MIN_TRADE_AMOUNT': '2000.0',
-            'MAX_POSITION_SIZE': '1000.0'
-        }):
+        env = base_manual_env.copy()
+        env['MIN_TRADE_AMOUNT'] = '2000.0'
+        env['MAX_POSITION_VALUE_USD'] = '1000.0'  # Use correct env var name
+        with patch.dict(os.environ, env, clear=True):
             with pytest.raises(ConfigurationError) as exc_info:
                 Config()
             assert "min_trade_amount" in str(exc_info.value)

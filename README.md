@@ -187,6 +187,11 @@ The project is structured into epics following an agile development approach:
 
 See `docs/epics/` for detailed epic specifications.
 
+## Saxo Configuration Module
+
+- Guide: [`docs/CONFIG_MODULE_GUIDE.md`](docs/CONFIG_MODULE_GUIDE.md)
+- Implementation: `config/config.py`
+
 ## Important Notes
 
 ⚠️ **Paper Trading Only**: This bot is configured for paper trading. Never use it with a live trading account without thorough testing and understanding of the risks.

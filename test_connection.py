@@ -1,7 +1,13 @@
+"""Saxo OpenAPI Connection Test (script)
+
+This file is intended to be run as a script:
+
+    python test_connection.py
+
+It is NOT a pytest test module.
 """
-Saxo OpenAPI Connection Test
-Verifies API credentials and network connectivity.
-"""
+
+__test__ = False
 import os
 import sys
 from datetime import datetime

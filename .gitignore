@@ -6,6 +6,9 @@
 # OAuth tokens and secrets
 .secrets/
 
+# Instrument resolution cache
+.cache/
+
 # Virtual environment
 venv/
 .venv/

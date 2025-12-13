@@ -133,8 +133,37 @@ def _load_trading_settings(self):
     self.trading_hours_mode = os.getenv("TRADING_HOURS_MODE", "fixed").lower()
     
     # Trading Hours (in UTC) - used when mode = "fixed"
-    self.market_open_hour = int(os.getenv("MARKET_OPEN_HOUR", "14"))  # 9:30 AM EST = 14:30 UTC
-    self.market_close_hour = int(os.getenv("MARKET_CLOSE_HOUR", "21"))  # 4:00 PM EST = 21:00 UTC
+    # Supports HH:MM format (e.g., "14:30") or integer hour (e.g., "14")
+    self._parse_trading_hours()
+    
+def _parse_trading_hours(self):
+    """
+    Parse trading hours from environment, supporting both HH:MM and integer formats.
+    
+    Examples:
+        MARKET_OPEN_TIME=14:30  → 14 hours, 30 minutes (9:30 AM EST = 14:30 UTC)
+        MARKET_OPEN_TIME=14     → 14 hours, 0 minutes (legacy integer format)
+        MARKET_CLOSE_TIME=21:00 → 21 hours, 0 minutes (4:00 PM EST = 21:00 UTC)
+    """
+    # Parse open time
+    open_time_str = os.getenv("MARKET_OPEN_TIME", os.getenv("MARKET_OPEN_HOUR", "14:30"))
+    close_time_str = os.getenv("MARKET_CLOSE_TIME", os.getenv("MARKET_CLOSE_HOUR", "21:00"))
+    
+    def parse_time(time_str: str) -> tuple:
+        """Parse time string to (hour, minute) tuple."""
+        time_str = str(time_str).strip()
+        if ":" in time_str:
+            parts = time_str.split(":")
+            return int(parts[0]), int(parts[1])
+        else:
+            return int(time_str), 0
+    
+    self.market_open_hour, self.market_open_minute = parse_time(open_time_str)
+    self.market_close_hour, self.market_close_minute = parse_time(close_time_str)
+    
+    # Legacy compatibility: also set combined minute values for precise comparisons
+    self.market_open_minutes = self.market_open_hour * 60 + self.market_open_minute
+    self.market_close_minutes = self.market_close_hour * 60 + self.market_close_minute
     
     # Logging and Monitoring
     self.log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -280,20 +309,36 @@ def calculate_shares_for_stock(self, price: float, risk_pct: float = 1.0) -> int
     shares = int(value_usd / price)
     return max(shares, 1)  # Minimum 1 share
 
-def is_trading_allowed(self, instrument: Dict[str, Any], current_hour: Optional[int] = None) -> bool:
+def is_trading_allowed(
+    self, 
+    instrument: Dict[str, Any], 
+    current_hour: Optional[int] = None,
+    current_minute: Optional[int] = None,
+    current_weekday: Optional[int] = None
+) -> bool:
     """
     Check if trading is allowed based on trading hours mode and asset type.
+    
+    Supports injectable time parameters for testability.
     
     Args:
         instrument: Instrument dict with 'asset_type' key
         current_hour: Hour to check (0-23). If None, uses current UTC hour.
+        current_minute: Minute to check (0-59). If None, uses current UTC minute.
+        current_weekday: Weekday to check (0=Mon, 6=Sun). If None, uses current UTC weekday.
     
     Returns:
         True if trading is allowed
     """
+    from datetime import datetime
+    now = datetime.utcnow()
+    
     if current_hour is None:
-        from datetime import datetime
-        current_hour = datetime.utcnow().hour
+        current_hour = now.hour
+    if current_minute is None:
+        current_minute = now.minute
+    if current_weekday is None:
+        current_weekday = now.weekday()
     
     # Mode: Always (24/7 operation)
     if self.trading_hours_mode == "always":
@@ -301,7 +346,7 @@ def is_trading_allowed(self, instrument: Dict[str, Any], current_hour: Optional[
     
     # Mode: Fixed hours (use configured market hours)
     elif self.trading_hours_mode == "fixed":
-        return self.is_within_trading_hours(current_hour)
+        return self.is_within_trading_hours(current_hour, current_minute)
     
     # Mode: Instrument-specific (check by asset type)
     elif self.trading_hours_mode == "instrument":
@@ -309,13 +354,11 @@ def is_trading_allowed(self, instrument: Dict[str, Any], current_hour: Optional[
         
         # Crypto/FX: 24/5 (Monday-Friday)
         if asset_type in ["FxSpot", "FxCrypto"]:
-            from datetime import datetime
-            weekday = datetime.utcnow().weekday()
-            return weekday < 5  # Monday(0) - Friday(4)
+            return current_weekday < 5  # Monday(0) - Friday(4)
         
         # Stocks/ETFs: Use configured hours
         elif asset_type in ["Stock", "Etf"]:
-            return self.is_within_trading_hours(current_hour)
+            return self.is_within_trading_hours(current_hour, current_minute)
         
         return False
     
@@ -362,26 +405,40 @@ def get_trading_mode(self) -> str:
     else:
         return "LIVE"
 
-def is_within_trading_hours(self, current_hour: Optional[int] = None) -> bool:
+def is_within_trading_hours(
+    self, 
+    current_hour: Optional[int] = None, 
+    current_minute: Optional[int] = None
+) -> bool:
     """
     Check if current time is within configured trading hours.
     
+    Supports precise minute-level comparison for accurate 9:30 AM checks.
+    
     Args:
         current_hour: Hour to check (0-23). If None, uses current UTC hour.
+        current_minute: Minute to check (0-59). If None, uses current UTC minute.
     
     Returns:
         True if within trading hours
     """
-    if current_hour is None:
-        from datetime import datetime
-        current_hour = datetime.utcnow().hour
+    from datetime import datetime
+    now = datetime.utcnow()
     
-    if self.market_open_hour <= self.market_close_hour:
-        # Normal case: e.g., 14-21
-        return self.market_open_hour <= current_hour < self.market_close_hour
+    if current_hour is None:
+        current_hour = now.hour
+    if current_minute is None:
+        current_minute = now.minute
+    
+    # Convert current time to minutes since midnight for precise comparison
+    current_minutes = current_hour * 60 + current_minute
+    
+    if self.market_open_minutes <= self.market_close_minutes:
+        # Normal case: e.g., 14:30-21:00 (870-1260 minutes)
+        return self.market_open_minutes <= current_minutes < self.market_close_minutes
     else:
-        # Wrap around midnight: e.g., 22-2
-        return current_hour >= self.market_open_hour or current_hour < self.market_close_hour
+        # Wrap around midnight: e.g., 22:00-02:00 (1320-120 minutes)
+        return current_minutes >= self.market_open_minutes or current_minutes < self.market_close_minutes
 
 def get_trading_settings_summary(self) -> Dict[str, Any]:
     """
@@ -454,9 +511,10 @@ MIN_TRADE_AMOUNT=100.0
 MAX_TRADES_PER_DAY=10
 
 # Trading Hours Configuration (SAXO-SPECIFIC)
-TRADING_HOURS_MODE=fixed  # Options: fixed | always | instrument
-MARKET_OPEN_HOUR=14       # If mode=fixed (UTC)
-MARKET_CLOSE_HOUR=21      # If mode=fixed (UTC)
+TRADING_HOURS_MODE=fixed    # Options: fixed | always | instrument
+MARKET_OPEN_TIME=14:30      # If mode=fixed (UTC) - supports HH:MM or integer hour
+MARKET_CLOSE_TIME=21:00     # If mode=fixed (UTC) - 9:30 AM - 4:00 PM EST
+# Legacy aliases also supported: MARKET_OPEN_HOUR, MARKET_CLOSE_HOUR
 
 # Logging
 LOG_LEVEL=INFO

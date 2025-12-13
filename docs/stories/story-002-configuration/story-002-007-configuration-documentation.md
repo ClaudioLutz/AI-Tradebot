@@ -266,19 +266,36 @@ if config.is_trading_allowed(crypto):
 
 ## Environment Variables Reference
 
-### Required Variables
+### Always Required
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SAXO_REST_BASE` | Saxo API base URL | `https://gateway.saxobank.com/sim/openapi` |
-| `SAXO_ACCESS_TOKEN` | Saxo API access token | `eyJhbGc...xyz` |
+
+### OAuth Mode Required (Recommended for Production)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SAXO_APP_KEY` | OAuth application key | `your_app_key_from_portal` |
+| `SAXO_APP_SECRET` | OAuth application secret | `your_app_secret` |
+| `SAXO_REDIRECT_URI` | OAuth redirect URI | `http://localhost:8080/callback` |
+
+**Note:** OAuth mode also requires token file (`.secrets/saxo_tokens.json`) created via `python scripts/saxo_login.py`
+
+### Manual Token Mode Required (Testing Only)
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SAXO_ACCESS_TOKEN` | 24-hour access token | `eyJhbGc...xyz` |
+
+**Note:** Manual tokens expire after 24 hours and require manual renewal.
 
 ### Optional Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SAXO_ENV` | `SIM` | Environment (SIM or LIVE) |
-| `WATCHLIST` | *(structured)* | JSON array of instruments |
+| `WATCHLIST_JSON` | *(structured)* | JSON array of instruments |
 | `DEFAULT_TIMEFRAME` | `1Min` | Market data timeframe |
 | `DRY_RUN` | `True` | Enable simulation mode |
 | `MAX_POSITION_VALUE_USD` | `1000.0` | Max position for Stock/ETF ($) |
@@ -677,10 +694,11 @@ config.print_configuration_summary()
 ### 5. Never Log Full Tokens
 
 ```python
-# BAD
-print(f"Token: {config.access_token}")
+# BAD - exposes full token in logs
+token = config.get_access_token()
+print(f"Token: {token}")
 
-# GOOD
+# GOOD - uses masked version for safe logging
 print(f"Token: {config.get_masked_token()}")
 ```
 

@@ -176,29 +176,57 @@ def _validate_auth_mode(self):
     else:
         raise ConfigurationError(f"Unknown auth mode: {self.auth_mode}")
 
-def _validate_instrument_resolution(self):
+def _validate_instrument_resolution(self, strict: bool = None):
     """
     Validate that all watchlist instruments can be resolved to {AssetType, Uic}.
     
     This is critical for Saxo order placement which requires both.
+    Validation strictness depends on runtime mode:
+    - LIVE trading: Strict (raises error if unresolved)
+    - DRY_RUN mode: Warning only (allows development/testing without UICs)
+    - Market data only: Warning only (UICs not required for quotes)
+    
+    Args:
+        strict: Override strictness. If None, auto-detect from trading mode.
+                True = error on unresolved, False = warning only.
     
     Raises:
-        ConfigurationError: If instruments lack UICs
+        ConfigurationError: If strict mode and instruments lack UICs
     """
     unresolved = [
         inst for inst in self.watchlist 
         if inst.get("uic") is None
     ]
     
-    if unresolved:
-        symbols = [inst.get("symbol") for inst in unresolved]
-        raise ConfigurationError(
-            f"Unresolved instruments found: {', '.join(symbols)}\n"
-            f"Run config.resolve_instruments() to query Saxo API for UICs.\n"
-            f"Or manually specify UICs in watchlist configuration."
-        )
+    if not unresolved:
+        print(f"✓ All {len(self.watchlist)} instruments resolved with UICs")
+        return
     
-    print(f"✓ All {len(self.watchlist)} instruments resolved with UICs")
+    # Determine strictness
+    if strict is None:
+        # Auto-detect: strict only for LIVE trading mode
+        strict = self.is_live_trading()
+    
+    symbols = [inst.get("symbol") for inst in unresolved]
+    message = (
+        f"Unresolved instruments found: {', '.join(symbols)}\n"
+        f"Run config.resolve_instruments() to query Saxo API for UICs.\n"
+        f"Or manually specify UICs in watchlist configuration."
+    )
+    
+    if strict:
+        # LIVE mode: require all UICs for order placement
+        raise ConfigurationError(message)
+    else:
+        # DRY_RUN or development: warn but allow
+        import warnings
+        warnings.warn(
+            f"⚠️  {len(unresolved)} unresolved instrument(s): {', '.join(symbols)}\n"
+            "   UICs required for order placement. In DRY_RUN mode, this is a warning.\n"
+            "   For LIVE trading, all instruments must be resolved.",
+            UserWarning
+        )
+        print(f"⚠️  {len(unresolved)} of {len(self.watchlist)} instruments unresolved (warning in DRY_RUN mode)")
 
 def _validate_crypto_asset_types(self):
     """
