@@ -26,7 +26,7 @@ import logging
 from datetime import datetime
 from typing import Dict, Optional
 
-from strategies.base import BaseStrategy, Signal, get_current_timestamp
+from strategies.base import BaseStrategy, Signal, get_current_timestamp, validate_decision_time_utc
 from strategies.indicators import (
     simple_moving_average,
     safe_slice_bars,
@@ -117,8 +117,14 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         Returns:
             Dict keyed by instrument_id with Signal objects
         """
+        # Validate decision_time_utc for timezone safety (Priority 2B)
+        validate_decision_time_utc(decision_time_utc)
+        
         signals = {}
         wall_clock_timestamp = get_current_timestamp()
+        # CRITICAL FIX (Priority 1A): Use decision_time_utc for signal.decision_time
+        # This ensures determinism and matches epic contract
+        decision_time_str = decision_time_utc.isoformat().replace('+00:00', 'Z')
         
         for instrument_id, data in market_data.items():
             symbol = data.get("symbol", "UNKNOWN")
@@ -135,7 +141,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                     action="HOLD",
                     reason="SIG_INSUFFICIENT_BARS",
                     timestamp=wall_clock_timestamp,
-                    decision_time=wall_clock_timestamp,
+                    decision_time=decision_time_str,  # FIXED: Use decision_time_utc
                     strategy_version="moving_average_v1.0",
                     metadata={"required": required_bars, "available": len(bars) if bars else 0}
                 )
@@ -211,23 +217,23 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             assert prev_short_ma is not None
             assert prev_long_ma is not None
             
-            # Guard against division by zero in threshold calculation
-            if self.threshold_bps is not None and current_long_ma == 0:
-                logger.warning(
-                    f"{instrument_id} ({symbol}): current_long_ma is zero, cannot apply threshold"
-                )
-                # Treat as no crossover to avoid invalid calculation
-                crossover_type = "NO_CROSSOVER"
-            else:
-                # Detect crossover (previous vs current comparison)
-                crossover_type = detect_crossover(
-                    current_short_ma, current_long_ma,
-                    prev_short_ma, prev_long_ma
-                )
-                
-                # Apply optional threshold filter
-                if self.threshold_bps is not None and crossover_type != "NO_CROSSOVER":
-                    separation_pct = abs(current_short_ma - current_long_ma) / current_long_ma
+            # Detect crossover (previous vs current comparison)
+            crossover_type = detect_crossover(
+                current_short_ma, current_long_ma,
+                prev_short_ma, prev_long_ma
+            )
+            
+            # Apply optional threshold filter (Priority 3C: Use abs() for robustness)
+            if self.threshold_bps is not None and crossover_type != "NO_CROSSOVER":
+                # Guard against division by zero using abs() for negative price support
+                if abs(current_long_ma) < 1e-10:  # Near-zero check
+                    logger.warning(
+                        f"{instrument_id} ({symbol}): current_long_ma near zero ({current_long_ma}), "
+                        f"cannot apply threshold filter"
+                    )
+                    crossover_type = "NO_CROSSOVER"
+                else:
+                    separation_pct = abs(current_short_ma - current_long_ma) / abs(current_long_ma)
                     threshold_decimal = self.threshold_bps / 10000.0
                     
                     if separation_pct < threshold_decimal:
@@ -237,9 +243,11 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                         )
                         crossover_type = "NO_CROSSOVER"
             
-            # Apply optional cooldown filter
+            # Apply optional cooldown filter (Priority 3B: Fix indexing to use valid_bars)
             if self.cooldown_bars is not None and crossover_type != "NO_CROSSOVER":
-                current_bar_index = len(bars) - 1
+                # FIXED: Use len(valid_bars) instead of len(bars) to avoid incorrect counting
+                # when bars contain future bars in backtests
+                current_bar_index = len(valid_bars) - 1
                 last_signal_index = self._last_signal_bar_index.get(instrument_id, -999999)
                 bars_since_signal = current_bar_index - last_signal_index
                 
@@ -282,6 +290,25 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                     f"(short_MA={current_short_ma:.2f}, long_MA={current_long_ma:.2f})"
                 )
             
+            # Extract decision_context from quote if available (Priority 4)
+            decision_context = None
+            policy_flags = None
+            quote = data.get("quote")
+            if quote:
+                # Extract market state and freshness info for audit trail
+                decision_context = {
+                    "market_state": quote.get("MarketState"),
+                    "price_source": quote.get("PriceSource"),
+                    "price_type_raw": quote.get("PriceType"),
+                    "price_type_bid_ask_mid": quote.get("PriceTypeBidAskMid"),
+                }
+                
+                # Extract policy-relevant flags
+                policy_flags = {
+                    "delayed_by_minutes": quote.get("DelayedByMinutes", 0),
+                    "is_tradable": quote.get("IsTradable", True),
+                }
+            
             # Create signal with enhanced schema
             signals[instrument_id] = Signal(
                 action=action,
@@ -292,6 +319,8 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 price_ref=last_close_price,
                 price_type="close",
                 data_time_range=data_time_range,
+                decision_context=decision_context,
+                policy_flags=policy_flags,
                 metadata={
                     "short_ma": round(current_short_ma, 2),
                     "long_ma": round(current_long_ma, 2),

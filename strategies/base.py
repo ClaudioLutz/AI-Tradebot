@@ -239,9 +239,13 @@ def signals_to_actions(signals: Dict[str, Signal]) -> Dict[str, str]:
     return {instrument_id: signal.action for instrument_id, signal in signals.items()}
 
 
-def get_current_timestamp() -> str:
+def get_current_timestamp(timestamp_provider=None) -> str:
     """
     Generate ISO8601 timestamp for signal creation (wall clock).
+    
+    Args:
+        timestamp_provider: Optional callable that returns datetime. If None, uses datetime.now(timezone.utc).
+                           For testing/backtesting, inject a fixed time provider for true idempotency.
     
     Returns:
         Current UTC time in ISO8601 format with Z suffix
@@ -250,8 +254,51 @@ def get_current_timestamp() -> str:
         >>> timestamp = get_current_timestamp()
         >>> print(timestamp)
         '2025-01-15T10:30:45.123456Z'
+        
+        >>> # For deterministic testing:
+        >>> from datetime import datetime, timezone
+        >>> fixed_time = datetime(2025, 1, 15, 10, 30, 45, tzinfo=timezone.utc)
+        >>> timestamp = get_current_timestamp(lambda: fixed_time)
     """
-    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    if timestamp_provider is None:
+        dt = datetime.now(timezone.utc)
+    else:
+        dt = timestamp_provider()
+    return dt.isoformat().replace('+00:00', 'Z')
+
+
+def validate_decision_time_utc(decision_time_utc: datetime) -> None:
+    """
+    Validate that decision_time_utc is timezone-aware and in UTC.
+    
+    This prevents accidental use of naive datetimes which can cause subtle
+    time-related bugs and look-ahead bias.
+    
+    Args:
+        decision_time_utc: The decision timestamp to validate
+    
+    Raises:
+        ValueError: If decision_time_utc is not timezone-aware or not UTC
+    
+    Example:
+        >>> from datetime import datetime, timezone
+        >>> decision_time = datetime.now(timezone.utc)
+        >>> validate_decision_time_utc(decision_time)  # OK
+        
+        >>> naive_time = datetime.now()
+        >>> validate_decision_time_utc(naive_time)  # Raises ValueError
+    """
+    if decision_time_utc.tzinfo is None:
+        raise ValueError(
+            f"decision_time_utc must be timezone-aware (got naive datetime: {decision_time_utc}). "
+            f"Use datetime.now(timezone.utc) for UTC time."
+        )
+    
+    if decision_time_utc.tzinfo != timezone.utc:
+        raise ValueError(
+            f"decision_time_utc must be in UTC timezone (got tzinfo={decision_time_utc.tzinfo}). "
+            f"Convert to UTC before calling strategy.generate_signals()."
+        )
 
 
 def get_bar_timestamp(bar: Dict) -> str:

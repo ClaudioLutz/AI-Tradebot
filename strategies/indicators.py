@@ -187,22 +187,43 @@ def safe_slice_bars(
             raise ValueError(f"Invalid timestamp at index {i}: {e}")
     
     if require_closed:
-        # as_of is now required - no fallback to datetime.now()
+        # Validate as_of is timezone-aware to prevent subtle bugs
+        if as_of.tzinfo is None:
+            raise ValueError(
+                f"as_of must be timezone-aware (got naive datetime: {as_of}). "
+                f"Use datetime.now(timezone.utc) or ensure decision_time_utc has timezone info."
+            )
+        
+        if as_of.tzinfo != timezone.utc:
+            raise ValueError(
+                f"as_of must be in UTC timezone (got tzinfo={as_of.tzinfo}). "
+                f"Convert to UTC before calling safe_slice_bars()."
+            )
+        
         reference_time = as_of
         
         filtered_bars = []
         
         for bar in bars:
-            # Check if bar is explicitly closed
-            if bar.get("is_closed", False):
-                filtered_bars.append(bar)
-                continue
-            
-            # Check if bar timestamp is before reference time
+            # CRITICAL: Always check bar_time < as_of to prevent look-ahead bias,
+            # even if is_closed=True. This protects against mislabeled is_closed flags
+            # or accidentally passing future bars in backtests.
             try:
                 bar_time = datetime.fromisoformat(bar["timestamp"].replace('Z', '+00:00'))
+                
+                # Require BOTH conditions for safety:
+                # 1. Bar timestamp strictly before decision time
+                # 2. Bar is marked closed OR we can infer closure from timestamp
                 if bar_time < reference_time:
+                    # Bar is in the past, so it's safe to use
                     filtered_bars.append(bar)
+                elif bar.get("is_closed", False):
+                    # If bar claims to be closed but timestamp >= reference_time,
+                    # this is a data quality issue - log warning and skip
+                    logger.warning(
+                        f"Bar marked is_closed=True but timestamp {bar['timestamp']} "
+                        f"is not before decision time {as_of.isoformat()}. Skipping to prevent look-ahead bias."
+                    )
             except (ValueError, KeyError):
                 # Skip bars with invalid timestamps when require_closed=True
                 continue
