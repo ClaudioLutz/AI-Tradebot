@@ -65,7 +65,10 @@ Create production-ready Moving Average Crossover strategy that:
 - [ ] Documented in strategy comments
 
 ### 5. Edge Case Handling
-- [ ] Returns HOLD with "INSUFFICIENT_BARS" if `len(bars) < long_window + 1`
+- [ ] Returns HOLD with "SIG_INSUFFICIENT_BARS" if `len(bars) < long_window + 1`
+- [ ] **Handles illiquid instruments**: If cannot obtain `long_window + 1` *closed* bars as of `decision_time_utc`, return HOLD with reason `SIG_INSUFFICIENT_CLOSED_BARS`
+  - Saxo note: Illiquid instruments can return fewer samples than expected
+  - Reference: https://openapi.help.saxo/hc/en-us/articles/6105016299677
 - [ ] Handles missing `bars` field gracefully
 - [ ] Handles None/invalid bar data
 - [ ] Logs informative messages at appropriate levels
@@ -212,7 +215,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 )
                 signals[instrument_id] = Signal(
                     action="HOLD",
-                    reason="INSUFFICIENT_BARS",
+                    reason="SIG_INSUFFICIENT_BARS",
                     timestamp=wall_clock_timestamp,
                     decision_time=wall_clock_timestamp,
                     metadata={"required": required_bars, "available": len(bars) if bars else 0}
@@ -220,18 +223,21 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 continue
             
             # Use safe_slice_bars to enforce closed-bar discipline
-            # Extract as_of time from last bar for deterministic behavior
-            last_bar_time = datetime.fromisoformat(bars[-1]["timestamp"].replace('Z', '+00:00'))
-            valid_bars = safe_slice_bars(bars, required_bars, require_closed=True, as_of=last_bar_time)
+            # IMPORTANT: Use decision_time_utc (passed to strategy) not last bar time
+            # This prevents illiquid instruments from using partial/future bars
+            valid_bars = safe_slice_bars(bars, required_bars, as_of=decision_time_utc, require_closed=True)
             if valid_bars is None:
                 logger.warning(
-                    f"{instrument_id} ({symbol}): No closed bars available"
+                    f"{instrument_id} ({symbol}): Insufficient CLOSED bars as of decision time. "
+                    f"Illiquid instruments may return fewer samples than expected. "
+                    f"Ref: https://openapi.help.saxo/hc/en-us/articles/6105016299677"
                 )
                 signals[instrument_id] = Signal(
                     action="HOLD",
-                    reason="INSUFFICIENT_BARS",
+                    reason="SIG_INSUFFICIENT_CLOSED_BARS",
                     timestamp=wall_clock_timestamp,
-                    decision_time=wall_clock_timestamp,
+                    decision_time=decision_time_utc.isoformat(),
+                    metadata={"required": required_bars, "available": len(bars) if bars else 0}
                 )
                 continue
             

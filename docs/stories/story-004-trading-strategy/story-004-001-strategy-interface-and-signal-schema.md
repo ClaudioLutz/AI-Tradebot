@@ -29,14 +29,26 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
   - `action`: Literal["BUY", "SELL", "HOLD"]
   - `reason`: str (e.g., "INSUFFICIENT_BARS", "CROSSOVER_UP", "CROSSOVER_DOWN", "NO_CROSSOVER")
   - `timestamp`: str (ISO8601 format - signal generation timestamp)
-  - `decision_time`: str (bar-close time or quote last-updated time - actual data timestamp)
+  - `decision_time`: str (bar-close time or quote last-updated time - actual data timestamp, must be ≤ timestamp)
   - `valid_until`: Optional[str] (ISO8601) (optional future: invalidate stale signals)
   - `confidence`: Optional[float] (0.0 to 1.0, for future use)
   - `price_ref`: Optional[float] (reference price: close, mid, bid/ask)
   - `price_type`: Optional[str] (e.g., "close", "mid", "bid", "ask")
   - `data_time_range`: Optional[dict] (e.g., {"first_bar": "...", "last_bar": "..."})
-  - `policy_flags`: Optional[dict] (e.g., {"used_delayed_data": false, "market_state": "Open"})
+  - `policy_flags`: Optional[dict] with **required keys** when populated:
+    - `market_state`: str (from Saxo MarketState enum)
+    - `delayed_by_minutes`: int
+    - `price_type_bid`: str (Saxo PriceType enum value)
+    - `price_type_ask`: str (Saxo PriceType enum value)
+    - `is_stale`: bool (computed from LastUpdated, not just DelayedByMinutes)
+    - `noaccess`: bool (true if NoAccess error from Saxo)
   - `metadata`: Optional[dict] (for strategy-specific info like MA values)
+
+### 2a. Reason Code Namespace
+- [ ] Document standard reason code prefixes:
+  - `DQ_*` - Data quality gating outcomes (e.g., `DQ_NOACCESS_MARKETDATA`, `DQ_STALE_DATA`)
+  - `SIG_*` - Strategy logic (e.g., `SIG_INSUFFICIENT_CLOSED_BARS`, `SIG_CROSSOVER_UP`)
+  - Keeps logs and tests stable, makes filtering/analysis easier
 
 ### 2a. Action Semantics Defined
 - [ ] Document action semantics explicitly:
@@ -90,14 +102,19 @@ class Signal:
     
     Attributes:
         action: Trading action to take (BUY=enter/add long, SELL=exit long or short, HOLD=no action)
-        reason: Human-readable explanation for the signal
+        reason: Human-readable explanation (use DQ_* for data quality, SIG_* for strategy logic)
         timestamp: ISO8601 timestamp when signal was generated (wall clock)
-        decision_time: ISO8601 timestamp of the data used (bar close or quote last-updated)
+        decision_time: ISO8601 timestamp of the data used (bar close or quote last-updated, must be ≤ timestamp)
         confidence: Optional confidence score (0.0 to 1.0)
         price_ref: Reference price used for decision (e.g., last close price)
         price_type: Type of price used ("close", "mid", "bid", "ask")
         data_time_range: Time range of data used (first/last bar timestamps)
-        policy_flags: Data quality flags (delayed_data, market_state, etc.)
+        policy_flags: Data quality flags with required keys when populated:
+            - market_state (str): Saxo MarketState enum value
+            - delayed_by_minutes (int): From Saxo Quote.DelayedByMinutes
+            - price_type_bid/ask (str): Saxo PriceType enum (e.g., "OldIndicative")
+            - is_stale (bool): Computed from LastUpdated timestamp
+            - noaccess (bool): True if Saxo returned NoAccess error
         metadata: Optional strategy-specific data (e.g., indicator values)
     
     Notes on action semantics:

@@ -35,13 +35,13 @@ Build foundation indicator library with:
 - [ ] Accepts `Sequence[float]` (more flexible than `List[float]`)
 
 ### 3. Safe Bar Slicing Utility
-- [ ] `safe_slice_bars(bars: List[dict], n: int, require_closed: bool = True, as_of: Optional[datetime] = None) -> Optional[List[dict]]`
-- [ ] If `require_closed=True`: only returns bars with timestamp before `as_of` (or current time if as_of=None)
-- [ ] `as_of` parameter makes function deterministic for backtesting
+- [ ] `safe_slice_bars(bars: List[dict], n: int, as_of: datetime, require_closed: bool = True) -> Optional[List[dict]]`
+- [ ] **`as_of` is REQUIRED** (no Optional) - caller must explicitly pass `decision_time_utc`
+- [ ] If `require_closed=True`: only returns bars with timestamp strictly < `as_of`
 - [ ] Returns None if insufficient bars available
 - [ ] Validates bar structure (has required fields)
 - [ ] Returns last `n` bars if available
-- [ ] **CRITICAL:** Never uses `datetime.now()` internally when `as_of` is provided (prevents time leakage)
+- [ ] **ELIMINATES time leakage by construction** - never calls `datetime.now()` internally
 
 ### 4. Crossover Detection Helper
 - [ ] `detect_crossover(current_short: float, current_long: float, prev_short: float, prev_long: float) -> str`
@@ -160,23 +160,24 @@ from typing import List, Optional, Dict
 def safe_slice_bars(
     bars: List[Dict], 
     n: int, 
+    as_of: datetime,
     require_closed: bool = True,
-    as_of: Optional[datetime] = None
 ) -> Optional[List[Dict]]:
     """
-    Safely extract last `n` bars, optionally enforcing "closed-bar only" rule.
+    Safely extract last `n` bars, enforcing "closed-bar only" discipline.
     
     This function prevents look-ahead bias by ensuring only completed bars are used.
     
-    **CRITICAL FOR BACKTESTING:** The `as_of` parameter makes this function deterministic.
-    In live mode, pass current UTC time. In backtest mode, pass the bar-close timestamp
-    you are evaluating. Never call without `as_of` in backtest mode.
+    **TIME DISCIPLINE:** The `as_of` parameter is REQUIRED (not Optional).
+    - Live mode: Pass `datetime.now(timezone.utc)` or current decision time
+    - Backtest mode: Pass the bar-close timestamp (event time) you are evaluating
+    - This eliminates time leakage by construction - no hidden `datetime.now()` calls
     
     Args:
         bars: List of bar dicts with at least {"close": float, "timestamp": str}
         n: Number of bars to extract
-        require_closed: If True, only use bars with timestamp before `as_of`
-        as_of: Reference time for determining "closed" bars (defaults to now if None)
+        as_of: Reference time for determining "closed" bars (REQUIRED, must be explicit)
+        require_closed: If True, only use bars with timestamp strictly < as_of
     
     Returns:
         Last `n` bars if available, or None if insufficient data
@@ -186,17 +187,17 @@ def safe_slice_bars(
     
     Example (live mode):
         >>> from datetime import datetime, timezone
-        >>> as_of = datetime.now(timezone.utc)
+        >>> decision_time = datetime.now(timezone.utc)
         >>> bars = [
         ...     {"close": 100, "timestamp": "2025-01-01T10:00:00Z"},
         ...     {"close": 101, "timestamp": "2025-01-01T10:05:00Z"},
         ... ]
-        >>> safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
+        >>> safe_slice_bars(bars, 2, as_of=decision_time, require_closed=True)
         [{"close": 100, ...}, {"close": 101, ...}]
     
     Example (backtest mode):
-        >>> as_of = datetime.fromisoformat("2025-01-01T10:10:00Z")
-        >>> safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
+        >>> decision_time = datetime.fromisoformat("2025-01-01T10:10:00Z")
+        >>> safe_slice_bars(bars, 2, as_of=decision_time, require_closed=True)
         [{"close": 100, ...}, {"close": 101, ...}]
     """
     if not bars or len(bars) < n:
@@ -210,10 +211,8 @@ def safe_slice_bars(
             raise ValueError(f"Bar missing 'timestamp' field: {bar}")
     
     if require_closed:
-        # Use as_of if provided, otherwise fall back to current time
-        # WARNING: Fallback to now() is for live mode convenience only
-        # In backtest mode, as_of MUST be provided
-        reference_time = as_of if as_of is not None else datetime.now(timezone.utc)
+        # as_of is now required - no fallback to datetime.now()
+        reference_time = as_of
         
         filtered_bars = []
         
@@ -351,19 +350,21 @@ def test_safe_slice_bars_sufficient():
         {"close": 101, "timestamp": "2025-01-01T10:05:00Z"},
         {"close": 102, "timestamp": "2025-01-01T10:10:00Z"},
     ]
-    result = safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
+    result = safe_slice_bars(bars, 2, as_of=as_of, require_closed=True)
     assert result is not None
     assert len(result) == 2
     assert result[0]["close"] == 101
 
 def test_safe_slice_bars_insufficient():
     """Test bar slicing with insufficient data."""
+    from datetime import datetime, timezone
+    as_of = datetime.fromisoformat("2025-01-01T10:15:00Z")
     bars = [{"close": 100, "timestamp": "2025-01-01T10:00:00Z"}]
-    result = safe_slice_bars(bars, 3, require_closed=False)
+    result = safe_slice_bars(bars, 3, as_of=as_of, require_closed=False)
     assert result is None
 
 def test_safe_slice_bars_deterministic():
-    """Test that as_of parameter makes function deterministic."""
+    """Test that required as_of parameter enforces determinism."""
     from datetime import datetime, timezone
     
     as_of = datetime.fromisoformat("2025-01-01T10:15:00Z")
@@ -374,8 +375,8 @@ def test_safe_slice_bars_deterministic():
         {"close": 103, "timestamp": "2025-01-01T10:20:00Z"},  # After as_of, should be excluded
     ]
     
-    result1 = safe_slice_bars(bars, 3, require_closed=True, as_of=as_of)
-    result2 = safe_slice_bars(bars, 3, require_closed=True, as_of=as_of)
+    result1 = safe_slice_bars(bars, 3, as_of=as_of, require_closed=True)
+    result2 = safe_slice_bars(bars, 3, as_of=as_of, require_closed=True)
     
     # Should return same bars both times (deterministic)
     assert result1 == result2
@@ -384,6 +385,15 @@ def test_safe_slice_bars_deterministic():
     
     # Bar at 10:20 should be excluded since it's after as_of
     assert all(bar["close"] != 103 for bar in result1)
+
+def test_safe_slice_bars_requires_as_of():
+    """Test that as_of is required (no default fallback to now())."""
+    bars = [{"close": 100, "timestamp": "2025-01-01T10:00:00Z"}]
+    
+    # This should fail at the type-checker level, but we test runtime behavior
+    # If as_of were Optional with default None, this would work - we want it to fail
+    with pytest.raises(TypeError):
+        safe_slice_bars(bars, 1)  # Missing required as_of argument
 
 def test_detect_crossover_up():
     """Test bullish crossover detection."""

@@ -47,11 +47,17 @@ Create a parameter management system that:
   - Example values
   - Impact on strategy behavior
 
-### 5. Audit Trail
+### 5. Audit Trail (Bailey et al. Anti-Overfitting)
 - [ ] All parameter loads logged at INFO level
 - [ ] Parameter validation failures logged at ERROR level
 - [ ] Strategy initialization logs include full parameter set
+- [ ] **Add STRATEGY_CONFIG_ID**: hash of (sorted params + strategy name + code version) logged at INFO
+- [ ] **Add optional experiment metadata** fields logged when parameter sweeps are run:
+  - `EXPERIMENT_NAME`: Name of parameter sweep/optimization run
+  - `CONFIGS_TRIED_COUNT`: Total number of configurations tested
+  - `SELECTION_RATIONALE`: Why this configuration was chosen
 - [ ] Prevents "silent parameter experimentation" (backtest overfitting risk)
+- [ ] **Reference**: https://carmamaths.org/jon/backtest2.pdf - Must disclose how many configs were tried
 
 ### 6. Integration with Moving Average Strategy
 - [ ] MovingAverageCrossoverStrategy can be instantiated from config
