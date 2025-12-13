@@ -24,6 +24,7 @@ Build extensible strategy loading system with:
   - `get_strategy(name, params) -> Strategy` factory function
   - `get_strategy_spec(name) -> StrategySpec` (exposes defaults + validator + creator)
   - `list_available_strategies() -> List[str]` (stable + sorted)
+  - **Versioning support**: Registry returns `{id, version, params_schema, description}` for documentation and reproducibility
 
 ### 2. Registration Methods
 - [ ] Decorator-based registration for easy extension
@@ -31,6 +32,7 @@ Build extensible strategy loading system with:
   - Option A (simple): explicit imports in `strategies/__init__.py`
   - Option B (auto-discovery): use `pkgutil.iter_modules(strategies.__path__)` to import submodules
 - [ ] Clear error messages for unknown strategies
+- [ ] **Prevent import side effects**: Registry should not execute strategy code on import beyond registration (no heavy computation, network calls, or state modification)
 
 ### 3. Integration with Config Loader
 - [ ] `create_strategy_from_config()` uses registry
@@ -41,8 +43,10 @@ Build extensible strategy loading system with:
 - [ ] Adding new strategy requires:
   1. Create strategy file in `strategies/`
   2. Implement `BaseStrategy` interface
-  3. Register in registry (one line)
-  4. No modification to core orchestration code
+  3. Expose `default_params()` and `validate_params()` methods
+  4. Register in registry (one line or decorator)
+  5. No modification to core orchestration code
+- [ ] "Unknown strategy id" behavior explicitly defined (hard error vs skip)
 
 ## Technical Implementation
 

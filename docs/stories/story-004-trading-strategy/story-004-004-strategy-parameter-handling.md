@@ -47,22 +47,30 @@ Create a parameter management system that:
   - Example values
   - Impact on strategy behavior
 
-### 5. Audit Trail (Bailey et al. Anti-Overfitting)
-- [ ] All parameter loads logged at INFO level
+### 5. Audit Trail and Parameter Provenance (Bailey et al. Anti-Overfitting)
+- [ ] All parameter loads logged at INFO level with **provenance** (source: file/env/default)
 - [ ] Parameter validation failures logged at ERROR level
 - [ ] Strategy initialization logs include full parameter set
-- [ ] **Add STRATEGY_CONFIG_ID**: hash of (sorted params + strategy name + code version) logged at INFO
-- [ ] **Add optional experiment metadata** fields logged when parameter sweeps are run:
-  - `EXPERIMENT_NAME`: Name of parameter sweep/optimization run
-  - `CONFIGS_TRIED_COUNT`: Total number of configurations tested
-  - `SELECTION_RATIONALE`: Why this configuration was chosen
+- [ ] **Add STRATEGY_CONFIG_HASH**: hash of (sorted params + strategy name) logged at INFO for reproducibility
+- [ ] **Parameter provenance tracking**: Log where each parameter came from (env var, config file, default)
+- [ ] **Add optional experiment metadata** fields for parameter sweeps:
+  - `EXPERIMENT_NAME`: Name of parameter sweep/optimization run (env var)
+  - `CONFIGS_TRIED_COUNT`: Total number of configurations tested (env var)
+  - `SELECTION_RATIONALE`: Why this configuration was chosen (env var or file)
 - [ ] Prevents "silent parameter experimentation" (backtest overfitting risk)
 - [ ] **Reference**: https://carmamaths.org/jon/backtest2.pdf - Must disclose how many configs were tried
 
-### 6. Integration with Moving Average Strategy
+### 6. Per-Instrument Parameter Overrides
+- [ ] Support per-instrument parameter overrides (even if "supported but not used" initially)
+- [ ] Design prevents painting into a corner (extensibility for future per-asset customization)
+- [ ] Example: `STRATEGY_PARAMS_OVERRIDES_JSON` with instrument_id keys
+- [ ] Document in `.env.example` for future use
+
+### 7. Integration with Moving Average Strategy
 - [ ] MovingAverageCrossoverStrategy can be instantiated from config
 - [ ] Example configuration provided in `.env.example`
 - [ ] Unit test verifies config loading works
+- [ ] Config hash is logged and accessible
 
 ## Technical Implementation Notes
 

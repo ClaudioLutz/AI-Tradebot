@@ -42,12 +42,20 @@ Create documentation covering:
 - [ ] Reference to Bailey et al.
 
 ### 4. Saxo-Specific Sections
+- [ ] **MarketState policy table**: Document default action for each Saxo MarketState enum value (Open, Closed, PreMarket, PostMarket, OpeningAuction, ClosingAuction, IntraDayAuction, TradingAtLast, Unknown)
+- [ ] **Data pitfalls section**: Chart gaps for illiquid instruments, DelayedByMinutes != freshness
 - [ ] CryptoFX weekday-only trading documented with reference
 - [ ] Extended hours risks documented with reference
-- [ ] Market state handling explained
+- [ ] Market state handling explained with enum values
 - [ ] Data quality expectations
 
-### 5. Code Examples
+### 5. Research Hygiene Section
+- [ ] **Anti-overfitting guidance**: Reference backtest overfitting/PBO literature (Bailey et al.)
+- [ ] Recommend OOS validation supported by harness
+- [ ] Document why parameter logging matters
+- [ ] Reference MA crossover academic studies (Brock-Lakonishok-LeBaron)
+
+### 6. Code Examples
 - [ ] Minimal working strategy example
 - [ ] Crossover detection example
 - [ ] Parameter validation example

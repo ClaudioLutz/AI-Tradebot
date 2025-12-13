@@ -39,17 +39,20 @@ Create production-ready Moving Average Crossover strategy that:
 
 ### 3. Signal Generation
 - [ ] Returns `Signal` objects (not just action strings)
-- [ ] Includes proper reason codes:
-  - "INSUFFICIENT_BARS" - not enough data
-  - "CROSSOVER_UP" - bullish crossover detected
-  - "CROSSOVER_DOWN" - bearish crossover detected
-  - "NO_CROSSOVER" - MA relationship stable
-  - "COOLDOWN_ACTIVE" - signal suppressed due to cooldown
+- [ ] Includes proper reason codes (using SIG_* prefix from Story 004-001):
+  - "SIG_INSUFFICIENT_BARS" - not enough data
+  - "SIG_CROSSOVER_UP" - bullish crossover detected
+  - "SIG_CROSSOVER_DOWN" - bearish crossover detected
+  - "SIG_NO_CROSSOVER" - MA relationship stable
+  - "SIG_COOLDOWN_ACTIVE" - signal suppressed due to cooldown
 - [ ] Uses **bar-close timestamp** as `decision_time` (not wall-clock `now()`)
 - [ ] Uses wall-clock time as `timestamp` for system logging
 - [ ] Includes `price_ref` (last close price) and `price_type` ("close")
 - [ ] Includes `data_time_range` (first and last bar timestamps)
+- [ ] Includes `decision_context` (market_state + freshness summary)
+- [ ] Includes `strategy_version` field for reproducibility
 - [ ] Metadata includes MA values for audit trail
+- [ ] **Position-awareness** (future-ready): Document that strategy doesn't track position state, but returns signals that execution layer can filter (prevents repeated BUY signals if already long)
 
 ### 4. Optional Threshold/Noise Filter
 - [ ] If `threshold_bps` provided, requires MA separation > threshold before signaling
@@ -72,6 +75,7 @@ Create production-ready Moving Average Crossover strategy that:
 - [ ] Handles missing `bars` field gracefully
 - [ ] Handles None/invalid bar data
 - [ ] Logs informative messages at appropriate levels
+- [ ] **Data quality integration**: When data quality gating is used (Story 004-005), strategy receives only acceptable-quality data. Strategy must still output HOLD for instruments with insufficient bars even if data quality is acceptable.
 
 ### 6. Integration Test
 - [ ] Test with deterministic fixture data showing:
@@ -79,7 +83,10 @@ Create production-ready Moving Average Crossover strategy that:
   - SELL signal on death cross
   - HOLD on insufficient bars
   - HOLD when no crossover
+  - HOLD when data gated (insufficient closed bars)
 - [ ] Verify signals are deterministic (same input → same output)
+- [ ] **No look-ahead test**: Verify last bar time < decision_time_utc in all tests
+- [ ] **Position filter stub**: Document (in comments) where position-awareness would be added in future (Epic 005)
 
 ## Technical Implementation Notes
 

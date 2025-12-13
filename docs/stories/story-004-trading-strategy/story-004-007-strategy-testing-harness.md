@@ -30,19 +30,27 @@ Build comprehensive testing infrastructure with:
 - [ ] `assert_signal_valid(signal)` - validates Signal structure
 - [ ] `assert_all_instruments_have_signals(signals, market_data)` - completeness check
 - [ ] Helper to verify determinism (same input → same output)
+- [ ] **No look-ahead test mode**: `assert_no_lookahead(signals, decision_time_utc)` - verifies last bar time < decision_time_utc for all signals
 
-### 3. Example Test Suite
+### 3. Example Test Suite and OOS Split Support
 - [ ] `tests/test_strategy_harness_example.py` demonstrates:
   - Crossover detection testing
   - Insufficient bars handling
   - Stale data handling
   - Market closed handling
   - Determinism verification
+  - **No look-ahead test**: Verifies last bar time < decision_time_utc
+- [ ] **OOS split support** (even minimal first pass):
+  - Helper to create rolling/walk-forward data splits
+  - Test mode that runs strategy on in-sample vs out-of-sample
+  - Reports degradation between IS and OOS performance
+  - Motivated by backtest overfitting literature (Bailey et al.)
 
 ### 4. Documentation
 - [ ] README in tests/fixtures/ explaining fixtures
 - [ ] Examples of how to use fixtures for new strategies
 - [ ] Common testing patterns documented
+- [ ] **OOS testing guidance**: Document why OOS validation matters, reference Bailey et al.
 
 ## Technical Implementation
 

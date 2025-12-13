@@ -25,6 +25,7 @@ Build foundation indicator library with:
 - [ ] Raises ValueError if `window <= 0`
 - [ ] Pure function (no side effects)
 - [ ] Accepts `Sequence[float]` (more flexible than `List[float]`)
+- [ ] **NaN/None policy**: Returns None if any input is None/NaN; raises TypeError for invalid input types
 
 ### 2. Exponential Moving Average Function (Optional)
 - [ ] `exponential_moving_average(values: Sequence[float], window: int, smoothing: float = 2.0) -> Optional[float]`
@@ -33,36 +34,57 @@ Build foundation indicator library with:
 - [ ] Multiplier = `smoothing / (window + 1)`
 - [ ] Pure function (no side effects)
 - [ ] Accepts `Sequence[float]` (more flexible than `List[float]`)
+- [ ] **NaN/None policy**: Returns None if any input is None/NaN
 
-### 3. Safe Bar Slicing Utility
+### 3. Safe Bar Slicing Utility (Stable-Order and Time-Aware)
 - [ ] `safe_slice_bars(bars: List[dict], n: int, as_of: datetime, require_closed: bool = True) -> Optional[List[dict]]`
 - [ ] **`as_of` is REQUIRED** (no Optional) - caller must explicitly pass `decision_time_utc`
 - [ ] If `require_closed=True`: only returns bars with timestamp strictly < `as_of`
 - [ ] Returns None if insufficient bars available
-- [ ] Validates bar structure (has required fields)
+- [ ] Validates bar structure (has required fields: 'close', 'timestamp')
+- [ ] **Stable-order**: Slices by timestamp (not just list index) when possible - validates bars are time-ordered
+- [ ] **Time-aware**: Parses timestamps and compares chronologically
 - [ ] Returns last `n` bars if available
 - [ ] **ELIMINATES time leakage by construction** - never calls `datetime.now()` internally
 
-### 4. Crossover Detection Helper
+### 4. Crossover Detection Helper (Deterministic Behavior)
 - [ ] `detect_crossover(current_short: float, current_long: float, prev_short: float, prev_long: float) -> str`
 - [ ] Returns "CROSSOVER_UP" if short crossed above long
 - [ ] Returns "CROSSOVER_DOWN" if long crossed above short  
 - [ ] Returns "NO_CROSSOVER" if no regime change
 - [ ] Uses previous vs current comparison (not just current instant)
+- [ ] **Deterministic on equal values**: Define "touch" vs "cross" behavior when MAs are exactly equal
+  - Current implementation: only true crossovers count (strict inequality change)
+  - Document this in function docstring
 
-### 5. Edge Case Handling
+### 5. Edge Case Handling (Numerical Robustness)
 - [ ] All functions handle None/empty inputs gracefully
 - [ ] Window size validation (positive integers only)
 - [ ] Type hints on all parameters and returns
 - [ ] Clear error messages for invalid inputs
+- [ ] **Numerical robustness AC**: Test with:
+  - Empty list → returns None
+  - Length=1 → returns None if window > 1
+  - Non-monotonic time → raises ValueError or warns
+  - Missing 'close' field → raises KeyError or ValueError
+  - NaN/None values → returns None
+  - All-zero values → handles gracefully (no division by zero)
 
-### 6. Unit Tests
+### 6. Unit Tests (Comprehensive Edge Cases)
 - [ ] Tests for SMA with exact hand-calculated values
 - [ ] Tests for EMA with exact hand-calculated values
 - [ ] Tests for insufficient data (returns None)
 - [ ] Tests for invalid window sizes (raises ValueError)
-- [ ] Tests for crossover detection (all scenarios)
+- [ ] Tests for crossover detection (all scenarios including equal values)
 - [ ] Tests for safe_slice_bars with require_closed flag
+- [ ] **Edge case tests**:
+  - Empty list input
+  - Length=1 list
+  - Non-monotonic timestamps
+  - Missing 'close' field in bars
+  - NaN/None values in data
+  - All-zero values
+  - "Touch" vs "cross" (equal MA values)
 
 ## Technical Implementation Notes
 
@@ -92,10 +114,16 @@ def simple_moving_average(values: Sequence[float], window: int) -> Optional[floa
     
     Raises:
         ValueError: If window <= 0
+        TypeError: If values contain non-numeric types
+    
+    NaN/None Policy:
+        Returns None if any value is None or NaN (ensures numeric robustness).
     
     Example:
         >>> simple_moving_average([100, 101, 102, 103, 104], window=3)
         103.0  # Average of [102, 103, 104]
+        >>> simple_moving_average([100, None, 102], window=2)
+        None  # Contains None value
     """
     if window <= 0:
         raise ValueError(f"Window must be positive, got {window}")
@@ -103,7 +131,15 @@ def simple_moving_average(values: Sequence[float], window: int) -> Optional[floa
     if not values or len(values) < window:
         return None
     
-    return sum(values[-window:]) / window
+    # Check for None/NaN in last window values
+    window_values = values[-window:]
+    for val in window_values:
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return None
+        if not isinstance(val, (int, float)):
+            raise TypeError(f"All values must be numeric, got {type(val)}")
+    
+    return sum(window_values) / window
 ```
 
 ### Exponential Moving Average Implementation
@@ -173,6 +209,9 @@ def safe_slice_bars(
     - Backtest mode: Pass the bar-close timestamp (event time) you are evaluating
     - This eliminates time leakage by construction - no hidden `datetime.now()` calls
     
+    **STABLE-ORDER:** Slices by timestamp, not just list index. Validates bars are
+    time-ordered (monotonic increasing timestamps).
+    
     Args:
         bars: List of bar dicts with at least {"close": float, "timestamp": str}
         n: Number of bars to extract
@@ -183,7 +222,7 @@ def safe_slice_bars(
         Last `n` bars if available, or None if insufficient data
     
     Raises:
-        ValueError: If bars have invalid structure
+        ValueError: If bars have invalid structure or non-monotonic timestamps
     
     Example (live mode):
         >>> from datetime import datetime, timezone
@@ -203,12 +242,25 @@ def safe_slice_bars(
     if not bars or len(bars) < n:
         return None
     
-    # Validate bar structure
-    for bar in bars[-n:]:
+    # Validate bar structure AND check for monotonic timestamps
+    prev_time = None
+    for i, bar in enumerate(bars):
         if "close" not in bar:
-            raise ValueError(f"Bar missing 'close' field: {bar}")
+            raise ValueError(f"Bar missing 'close' field at index {i}: {bar}")
         if "timestamp" not in bar:
-            raise ValueError(f"Bar missing 'timestamp' field: {bar}")
+            raise ValueError(f"Bar missing 'timestamp' field at index {i}: {bar}")
+        
+        # Parse timestamp to validate format and check monotonicity
+        try:
+            bar_time = datetime.fromisoformat(bar["timestamp"].replace('Z', '+00:00'))
+            if prev_time is not None and bar_time <= prev_time:
+                raise ValueError(
+                    f"Non-monotonic timestamps at index {i}: "
+                    f"{bar['timestamp']} is not after {bars[i-1]['timestamp']}"
+                )
+            prev_time = bar_time
+        except ValueError as e:
+            raise ValueError(f"Invalid timestamp at index {i}: {e}")
     
     if require_closed:
         # as_of is now required - no fallback to datetime.now()
@@ -264,9 +316,20 @@ def detect_crossover(
         "CROSSOVER_DOWN": Short crossed below long (bearish)
         "NO_CROSSOVER": No regime change
     
+    Deterministic Behavior on Equal Values ("Touch" vs "Cross"):
+        When MAs are exactly equal, this is treated as "not crossed" (requires strict
+        inequality change). For example:
+        - prev_short=100, prev_long=100 (equal) → current_short=101, current_long=100
+          Result: NO_CROSSOVER (was already touching, not a true cross)
+        - prev_short=99, prev_long=100 (below) → current_short=101, current_long=100
+          Result: CROSSOVER_UP (crossed from below to above)
+        
+        This prevents spurious signals when MAs merely "touch" without regime change.
+    
     Reference:
         Brock, Lakonishok, LeBaron (1992) - Simple Technical Trading Rules
     """
+    # Use strict inequality: only count as "above" if strictly greater
     prev_short_above = prev_short > prev_long
     current_short_above = current_short > current_long
     
@@ -418,6 +481,57 @@ def test_detect_no_crossover():
         prev_short=106, prev_long=100
     )
     assert result == "NO_CROSSOVER"
+
+def test_detect_crossover_equal_values():
+    """Test deterministic behavior when MAs are exactly equal (touch vs cross)."""
+    # Case 1: MAs were equal, now short is above → NO_CROSSOVER (touch, not cross)
+    result = detect_crossover(
+        current_short=101, current_long=100,
+        prev_short=100, prev_long=100
+    )
+    assert result == "NO_CROSSOVER"
+    
+    # Case 2: Short crossed from below to above through equality → CROSSOVER_UP
+    result = detect_crossover(
+        current_short=101, current_long=100,
+        prev_short=99, prev_long=100
+    )
+    assert result == "CROSSOVER_UP"
+    
+    # Case 3: Both equal now, were equal before → NO_CROSSOVER
+    result = detect_crossover(
+        current_short=100, current_long=100,
+        prev_short=100, prev_long=100
+    )
+    assert result == "NO_CROSSOVER"
+
+def test_sma_nan_handling():
+    """Test SMA returns None for NaN/None values."""
+    import math
+    assert simple_moving_average([100, None, 102], window=2) is None
+    assert simple_moving_average([100, math.nan, 102], window=2) is None
+
+def test_safe_slice_bars_non_monotonic():
+    """Test that non-monotonic timestamps raise ValueError."""
+    from datetime import datetime, timezone
+    as_of = datetime.now(timezone.utc)
+    
+    bars = [
+        {"close": 100, "timestamp": "2025-01-01T10:05:00Z"},  # Later time first
+        {"close": 101, "timestamp": "2025-01-01T10:00:00Z"},  # Earlier time second
+    ]
+    
+    with pytest.raises(ValueError, match="Non-monotonic"):
+        safe_slice_bars(bars, 2, as_of=as_of)
+
+def test_sma_empty_list():
+    """Test SMA handles empty list gracefully."""
+    assert simple_moving_average([], window=1) is None
+
+def test_sma_length_one():
+    """Test SMA with length=1 list."""
+    assert simple_moving_average([100], window=1) == 100.0
+    assert simple_moving_average([100], window=2) is None
 ```
 
 ## Dependencies

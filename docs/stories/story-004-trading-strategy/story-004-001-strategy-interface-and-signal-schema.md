@@ -23,18 +23,23 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
   - `generate_signals(market_data: dict, decision_time_utc: datetime) -> dict[instrument_id, Signal]` method signature
   - Clear docstrings explaining inputs/outputs
   - Contract: strategy may only use bars strictly **< decision_time_utc** (UTC)
+  - **Idempotency guarantee**: same inputs ⇒ same outputs (important for retries and testing)
+  - **Time semantics**: `decision_time_utc` is the "as-of" timestamp; bars must be strictly earlier
 
-### 2. Signal Schema Defined
-- [ ] `Signal` dataclass/TypedDict created with fields:
+### 2. Signal Schema Defined (Typed Model with JSON Serialization)
+- [ ] `Signal` **dataclass** (not TypedDict) created with fields:
   - `action`: Literal["BUY", "SELL", "HOLD"]
-  - `reason`: str (e.g., "INSUFFICIENT_BARS", "CROSSOVER_UP", "CROSSOVER_DOWN", "NO_CROSSOVER")
-  - `timestamp`: str (ISO8601 format - signal generation timestamp)
-  - `decision_time`: str (bar-close time or quote last-updated time - actual data timestamp, must be ≤ timestamp)
+  - `reason`: str (use structured codes - see 2a below)
+  - `timestamp`: str (ISO8601 format - signal generation timestamp, wall clock)
+  - `decision_time`: str (ISO8601 format - bar-close time or quote last-updated time, must be ≤ timestamp)
+  - `strategy_version`: str (version/hash of strategy for reproducibility)
+  - `schema_version`: str (signal schema version for future evolution)
   - `valid_until`: Optional[str] (ISO8601) (optional future: invalidate stale signals)
   - `confidence`: Optional[float] (0.0 to 1.0, for future use)
   - `price_ref`: Optional[float] (reference price: close, mid, bid/ask)
   - `price_type`: Optional[str] (e.g., "close", "mid", "bid", "ask")
   - `data_time_range`: Optional[dict] (e.g., {"first_bar": "...", "last_bar": "..."})
+  - `decision_context`: Optional[dict] (market_state + freshness summary for traceability)
   - `policy_flags`: Optional[dict] with **required keys** when populated:
     - `market_state`: str (from Saxo MarketState enum)
     - `delayed_by_minutes`: int
@@ -43,12 +48,15 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
     - `is_stale`: bool (computed from LastUpdated, not just DelayedByMinutes)
     - `noaccess`: bool (true if NoAccess error from Saxo)
   - `metadata`: Optional[dict] (for strategy-specific info like MA values)
+- [ ] **JSON serialization method**: `to_dict()` or `to_json()` for explicit serialization rules
+- [ ] **Validation in __post_init__**: prevent silent schema drift
 
-### 2a. Reason Code Namespace
-- [ ] Document standard reason code prefixes:
-  - `DQ_*` - Data quality gating outcomes (e.g., `DQ_NOACCESS_MARKETDATA`, `DQ_STALE_DATA`)
-  - `SIG_*` - Strategy logic (e.g., `SIG_INSUFFICIENT_CLOSED_BARS`, `SIG_CROSSOVER_UP`)
+### 2a. Reason Code Taxonomy (Cross-Cutting)
+- [ ] Document standard reason code prefixes (shared across all strategies):
+  - `DQ_*` - Data quality gating outcomes (e.g., `DQ_NOACCESS_MARKETDATA`, `DQ_STALE_DATA`, `DQ_MARKET_CLOSED`)
+  - `SIG_*` - Strategy logic (e.g., `SIG_INSUFFICIENT_CLOSED_BARS`, `SIG_CROSSOVER_UP`, `SIG_NO_CROSSOVER`)
   - Keeps logs and tests stable, makes filtering/analysis easier
+- [ ] Create `REASON_CODE_REGISTRY` in `strategies/base.py` documenting all standard codes with descriptions
 
 ### 2a. Action Semantics Defined
 - [ ] Document action semantics explicitly:
@@ -74,10 +82,12 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
 - [ ] Input validation for market_data structure
 - [ ] Signal validation (action must be valid, timestamp must be ISO8601)
 
-### 6. Documentation
+### 6. Documentation and Explainability Contract
 - [ ] Interface docstrings explain contract clearly
 - [ ] Example usage provided in module docstring
 - [ ] Rationale for rich signal schema documented (auditability, no look-ahead bias)
+- [ ] **Explainability contract**: Every signal must be explainable via reason + metadata
+- [ ] Document required log fields for every decision: `strategy_id`, `strategy_version`, `instrument_id`, `decision_time_utc`, `market_state`, `freshness.age_seconds`, `data_quality.is_indicative`, `data_quality.is_delayed`, `reason_code`
 
 ## Technical Implementation Notes
 
@@ -102,13 +112,16 @@ class Signal:
     
     Attributes:
         action: Trading action to take (BUY=enter/add long, SELL=exit long or short, HOLD=no action)
-        reason: Human-readable explanation (use DQ_* for data quality, SIG_* for strategy logic)
+        reason: Structured reason code (use DQ_* for data quality, SIG_* for strategy logic)
         timestamp: ISO8601 timestamp when signal was generated (wall clock)
         decision_time: ISO8601 timestamp of the data used (bar close or quote last-updated, must be ≤ timestamp)
+        strategy_version: Version/hash of strategy for reproducibility
+        schema_version: Signal schema version (default "1.0")
         confidence: Optional confidence score (0.0 to 1.0)
         price_ref: Reference price used for decision (e.g., last close price)
         price_type: Type of price used ("close", "mid", "bid", "ask")
         data_time_range: Time range of data used (first/last bar timestamps)
+        decision_context: Market state + freshness summary for audit trail
         policy_flags: Data quality flags with required keys when populated:
             - market_state (str): Saxo MarketState enum value
             - delayed_by_minutes (int): From Saxo Quote.DelayedByMinutes
@@ -122,21 +135,27 @@ class Signal:
         - SELL: Exit long position (or enter short if execution module supports)
         - HOLD: No action, maintain current position
         - Execution module (Epic 005) defines whether SELL can initiate shorts
+    
+    Explainability Contract:
+        Every signal must be explainable: reason + metadata provide complete context.
     """
     action: Literal["BUY", "SELL", "HOLD"]
     reason: str
     timestamp: str  # ISO8601 format - signal generation time
     decision_time: str  # ISO8601 format - data timestamp (bar close or quote time)
+    strategy_version: str = "unknown"
+    schema_version: str = "1.0"
     valid_until: Optional[str] = None
     confidence: Optional[float] = None
     price_ref: Optional[float] = None
     price_type: Optional[str] = None
     data_time_range: Optional[dict] = None
+    decision_context: Optional[dict] = None
     policy_flags: Optional[dict] = None
     metadata: Optional[dict] = None
     
     def __post_init__(self):
-        """Validate signal fields."""
+        """Validate signal fields to prevent silent schema drift."""
         if self.action not in ["BUY", "SELL", "HOLD"]:
             raise ValueError(f"Invalid action: {self.action}")
         
@@ -147,8 +166,36 @@ class Signal:
         # Validate timestamp format (basic check)
         try:
             datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
-        except ValueError:
-            raise ValueError(f"Invalid ISO8601 timestamp: {self.timestamp}")
+            datetime.fromisoformat(self.decision_time.replace('Z', '+00:00'))
+        except ValueError as e:
+            raise ValueError(f"Invalid ISO8601 timestamp: {e}")
+        
+        # Ensure decision_time <= timestamp (no time leakage)
+        dt_decision = datetime.fromisoformat(self.decision_time.replace('Z', '+00:00'))
+        dt_signal = datetime.fromisoformat(self.timestamp.replace('Z', '+00:00'))
+        if dt_decision > dt_signal:
+            raise ValueError(
+                f"decision_time ({self.decision_time}) cannot be after timestamp ({self.timestamp})"
+            )
+    
+    def to_dict(self) -> dict:
+        """Convert Signal to dict for JSON serialization with explicit rules."""
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "timestamp": self.timestamp,
+            "decision_time": self.decision_time,
+            "strategy_version": self.strategy_version,
+            "schema_version": self.schema_version,
+            "valid_until": self.valid_until,
+            "confidence": self.confidence,
+            "price_ref": self.price_ref,
+            "price_type": self.price_type,
+            "data_time_range": self.data_time_range,
+            "decision_context": self.decision_context,
+            "policy_flags": self.policy_flags,
+            "metadata": self.metadata,
+        }
 ```
 
 ### Interface Design
@@ -186,6 +233,19 @@ class BaseStrategy(ABC):
 
         Raises:
             ValueError: If market_data structure is invalid
+        
+        Contract (Idempotency):
+            Same inputs ⇒ same outputs (same market_data + decision_time_utc → same signals).
+            Important for retries and testing.
+        
+        Contract (Time Semantics):
+            - decision_time_utc is the "as-of" timestamp
+            - Bars must have timestamps strictly < decision_time_utc
+            - No look-ahead bias: cannot use future information
+        
+        Contract (Explainability):
+            - Every signal must have a clear reason code
+            - Reason + metadata must fully explain the decision
         """
         raise NotImplementedError
 ```
@@ -241,6 +301,14 @@ def get_bar_timestamp(bar: dict) -> str:
 4. **Data provenance:** `data_time_range` and `policy_flags` create audit trail of what data was used
 5. **Metadata capture:** Allows strategies to record indicator values for analysis
 6. **Confidence scores:** Enables future portfolio optimization and signal weighting
+7. **Strategy versioning:** `strategy_version` enables reproducibility and A/B testing
+8. **Schema evolution:** `schema_version` allows signal format to evolve without breaking consumers
+
+### Why Typed Dataclass vs TypedDict?
+- **Validation**: `__post_init__` catches errors at creation time (not serialization time)
+- **IDE support**: Better autocomplete and type checking
+- **Explicit serialization**: `to_dict()` method documents serialization rules
+- **Prevents silent drift**: Type hints + validation prevent gradual schema corruption
 
 ### Why Separate `timestamp` and `decision_time`?
 - `timestamp`: When the signal was generated (wall clock) - for system logging
@@ -272,17 +340,21 @@ def test_signal_validation():
     # Valid signal with all fields
     signal_full = Signal(
         action="BUY",
-        reason="CROSSOVER_UP",
+        reason="SIG_CROSSOVER_UP",
         timestamp=ts,
         decision_time=ts,
+        strategy_version="v1.0",
+        schema_version="1.0",
         confidence=0.8,
         price_ref=100.50,
         price_type="close",
         data_time_range={"first_bar": ts, "last_bar": ts},
+        decision_context={"market_state": "Open", "freshness_age_seconds": 5},
         policy_flags={"market_state": "Open", "used_delayed_data": False},
         metadata={"short_ma": 101.0, "long_ma": 99.0}
     )
     assert signal_full.price_ref == 100.50
+    assert signal_full.strategy_version == "v1.0"
     
     # Invalid action
     with pytest.raises(ValueError):
@@ -295,6 +367,39 @@ def test_signal_validation():
     # Invalid timestamp
     with pytest.raises(ValueError):
         Signal("BUY", "TEST", "not-a-timestamp", ts)
+    
+    # Time leakage: decision_time > timestamp
+    with pytest.raises(ValueError, match="cannot be after"):
+        future_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        Signal("BUY", "TEST", ts, future_time.isoformat())
+
+def test_signal_serialization():
+    """Test Signal to_dict() JSON serialization."""
+    ts = get_current_timestamp()
+    signal = Signal(
+        action="BUY",
+        reason="SIG_CROSSOVER_UP",
+        timestamp=ts,
+        decision_time=ts,
+        strategy_version="v1.0",
+        metadata={"short_ma": 101.0}
+    )
+    
+    signal_dict = signal.to_dict()
+    assert signal_dict["action"] == "BUY"
+    assert signal_dict["strategy_version"] == "v1.0"
+    assert signal_dict["metadata"]["short_ma"] == 101.0
+
+def test_signal_idempotency():
+    """Test that same inputs produce same signal (idempotency for AC)."""
+    ts = get_current_timestamp()
+    dt = "2025-01-15T10:00:00Z"
+    
+    signal1 = Signal("BUY", "TEST", ts, dt, metadata={"value": 100})
+    signal2 = Signal("BUY", "TEST", ts, dt, metadata={"value": 100})
+    
+    # Signals with same inputs should serialize identically
+    assert signal1.to_dict() == signal2.to_dict()
 
 def test_signals_to_actions():
     """Test action extraction from signals."""
