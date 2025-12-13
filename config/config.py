@@ -108,9 +108,22 @@ class Config:
     def _initialize_authentication(self) -> None:
         # Prefer OAuth only when fully configured (app creds + redirect URI).
         # Otherwise fall back to manual token mode if present.
-        if self.app_key and self.app_secret and self.redirect_uri:
+        oauth_configured = bool(self.app_key and self.app_secret and self.redirect_uri)
+        manual_configured = bool(self.manual_access_token)
+        
+        # Guard against accidental auth conflict (Issue B from Epic 002 review)
+        if oauth_configured and manual_configured:
+            raise ConfigurationError(
+                "Authentication conflict detected: both OAuth and manual token are configured.\n"
+                "To avoid 24-hour token expiration issues, choose ONE authentication mode:\n"
+                "  - For OAuth (recommended): unset SAXO_ACCESS_TOKEN in .env\n"
+                "  - For manual testing: unset SAXO_APP_KEY, SAXO_APP_SECRET, SAXO_REDIRECT_URI\n"
+                "See docs/OAUTH_SETUP_GUIDE.md for details."
+            )
+        
+        if oauth_configured:
             self.auth_mode = "oauth"
-        elif self.manual_access_token:
+        elif manual_configured:
             self.auth_mode = "manual"
         else:
             raise ConfigurationError(
@@ -230,7 +243,10 @@ class Config:
             self._instrument_cache = {}
 
     def _save_instrument_cache(self) -> None:
-        os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+        # Guard against cache path with no directory (Issue C from Epic 002 review)
+        dir_path = os.path.dirname(self._cache_file)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
         with open(self._cache_file, "w", encoding="utf-8") as f:
             json.dump(self._instrument_cache, f, indent=2)
 

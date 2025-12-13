@@ -1,13 +1,14 @@
 # AI Trading Bot
 
-An automated trading bot using the Alpaca API for paper trading. This bot implements configurable trading strategies and provides a foundation for algorithmic trading experimentation.
+An automated trading bot using the Saxo Bank OpenAPI for paper trading. This bot implements configurable trading strategies and provides a foundation for algorithmic trading experimentation.
 
 ## Features
 
-- 📈 Paper trading with Alpaca Markets API
-- 🔧 Configurable trading strategies
-- 📊 Real-time market data access
-- 📝 Comprehensive logging
+- 📈 Paper trading with Saxo Bank OpenAPI (SIM environment)
+- 🔧 Configurable trading strategies  
+- 📊 Real-time market data access (stocks, ETFs, FX, crypto)
+- 🔐 OAuth 2.0 authentication with automatic token refresh
+- 📝 Comprehensive configuration and logging
 - ⏰ Scheduled trading execution
 - 🧪 Safe paper trading mode (no real money at risk)
 
@@ -16,7 +17,7 @@ An automated trading bot using the Alpaca API for paper trading. This bot implem
 Before you begin, ensure you have the following:
 
 - **Python 3.8+** installed ([Download Python](https://www.python.org/downloads/))
-- **Alpaca Account** with paper trading enabled ([Sign up](https://alpaca.markets))
+- **Saxo Developer Account** with OpenAPI access ([Sign up](https://www.developer.saxo))
 - **Git** for version control (optional but recommended)
 
 ## Quick Start
@@ -57,26 +58,36 @@ pip install -r requirements.txt
    cp .env.example .env
    ```
 
-2. Edit `.env` with your Alpaca API credentials:
+2. Edit `.env` with your Saxo OpenAPI credentials:
    ```env
-   APCA_API_KEY_ID=your_api_key_here
-   APCA_API_SECRET_KEY=your_secret_key_here
-   APCA_API_BASE_URL=https://paper-api.alpaca.markets
+   SAXO_ENV=SIM
+   SAXO_REST_BASE=https://gateway.saxobank.com/sim/openapi
+   SAXO_AUTH_BASE=https://sim.logonvalidation.net
+
+   # OAuth Mode (Recommended)
+   SAXO_APP_KEY=your_app_key_here
+   SAXO_APP_SECRET=your_app_secret_here
+   SAXO_REDIRECT_URI=http://localhost:8765/callback
    ```
 
-3. Get your API keys from [Alpaca Dashboard](https://app.alpaca.markets/paper/dashboard/overview)
-   - Sign in to your Alpaca account
-   - Navigate to the Paper Trading section
-   - Go to "Your API Keys"
-   - Generate new keys or use existing ones
+3. Get your API credentials from [Saxo Developer Portal](https://www.developer.saxo):
+   - Sign in to your Saxo developer account
+   - Create or select an application
+   - Copy your App Key and App Secret
+   - Configure redirect URI: `http://localhost:8765/callback`
+
+4. Authenticate using OAuth:
+   ```bash
+   python scripts/saxo_login.py
+   ```
 
 ### 5. Verify Setup
 
 ```bash
-python test_connection.py
+python verify_env.py
 ```
 
-You should see "ALL TESTS PASSED" if everything is configured correctly.
+You should see configuration validation pass if everything is configured correctly.
 
 ### 6. Run the Bot
 
@@ -88,28 +99,38 @@ python main.py
 
 ```
 AI Trader/
-├── config/              # Configuration settings
+├── config/              # Configuration management
 │   ├── __init__.py
-│   └── settings.py      # Trading parameters and API config
+│   └── config.py        # Centralized config (Saxo OpenAPI)
 ├── data/                # Market data retrieval
 │   ├── __init__.py
-│   └── market_data.py   # Market data fetching functions
+│   ├── saxo_client.py   # Saxo REST API client
+│   └── market_data.py   # Market data functions
 ├── strategies/          # Trading strategies
 │   ├── __init__.py
 │   └── simple_strategy.py  # Strategy implementation
 ├── execution/           # Trade execution
 │   ├── __init__.py
 │   └── trade_executor.py   # Order placement logic
+├── auth/                # Authentication
+│   ├── __init__.py
+│   └── saxo_oauth.py    # OAuth 2.0 implementation
+├── scripts/             # Utility scripts
+│   ├── README.md
+│   └── saxo_login.py    # OAuth login helper
 ├── logs/                # Log files (generated at runtime)
 ├── tests/               # Test files
 │   ├── __init__.py
-│   ├── test_config.py
+│   ├── test_config_module.py
 │   ├── test_market_data.py
 │   ├── test_strategy.py
 │   └── test_execution.py
 ├── docs/                # Documentation
 │   ├── epics/          # Epic specifications
-│   └── stories/        # User stories
+│   ├── stories/        # User stories
+│   ├── CONFIG_MODULE_GUIDE.md
+│   ├── OAUTH_SETUP_GUIDE.md
+│   └── SAXO_MIGRATION_GUIDE.md
 ├── .env                 # Environment variables (not in git)
 ├── .env.example         # Environment template
 ├── .gitignore           # Git ignore rules
@@ -124,21 +145,32 @@ AI Trader/
 
 ### Trading Parameters
 
-Configure trading behavior in `config/settings.py`:
+Configure trading behavior in `.env`:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| SYMBOL | Stock symbol to trade | AAPL |
-| QUANTITY | Number of shares per trade | 1 |
-| CHECK_INTERVAL | Time between checks (minutes) | 15 |
+| DEFAULT_TIMEFRAME | Bar timeframe (1Min, 5Min, etc.) | 1Min |
+| DATA_LOOKBACK_DAYS | Historical data period | 30 |
+| DRY_RUN | Enable dry run mode | True |
+| MAX_POSITION_VALUE_USD | Max position size for stocks/ETFs | 1000.0 |
+| MAX_FX_NOTIONAL | Max notional for FX/crypto | 10000.0 |
+| STOP_LOSS_PCT | Stop loss percentage | 2.0 |
+| TAKE_PROFIT_PCT | Take profit percentage | 5.0 |
+
+See `docs/CONFIG_MODULE_GUIDE.md` for complete configuration reference.
 
 ### Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| APCA_API_KEY_ID | Alpaca API Key | Yes |
-| APCA_API_SECRET_KEY | Alpaca API Secret | Yes |
-| APCA_API_BASE_URL | API endpoint URL | Yes |
+| SAXO_REST_BASE | Saxo OpenAPI base URL | Yes |
+| SAXO_ENV | Environment (SIM or LIVE) | Yes |
+| SAXO_APP_KEY | OAuth app key | Yes (OAuth) |
+| SAXO_APP_SECRET | OAuth app secret | Yes (OAuth) |
+| SAXO_REDIRECT_URI | OAuth redirect URI | Yes (OAuth) |
+| SAXO_ACCESS_TOKEN | Manual 24h token | Yes (Manual mode) |
+
+**Note**: Choose ONE authentication mode (OAuth recommended for production, manual token for quick testing).
 
 ## Usage
 
@@ -162,23 +194,36 @@ python verify_env.py
 python test_connection.py
 ```
 
+### OAuth Authentication
+
+```bash
+# Initial authentication (opens browser)
+python scripts/saxo_login.py
+
+# Tokens are automatically refreshed by the bot
+```
+
 ### Testing
 
 ```bash
-# Run all tests (when implemented in Epic 008)
+# Run all tests
 python -m pytest tests/
 
-# Run specific test
-python -m pytest tests/test_strategy.py
+# Run specific test file
+python -m pytest tests/test_config_module.py
+
+# Run with verbose output
+python -m pytest tests/ -v
 ```
 
 ## Development Roadmap
 
 The project is structured into epics following an agile development approach:
 
-- ✅ **Epic 001**: Initial Setup and Environment (COMPLETE)
-- ⏳ **Epic 002**: Configuration Module
-- ⏳ **Epic 003**: Market Data Retrieval
+- ✅ **Epic 001-1**: Initial Setup and Environment (COMPLETE)
+- ✅ **Epic 001-2**: Saxo Bank Migration (COMPLETE)
+- ✅ **Epic 002**: Configuration Module (COMPLETE)
+- ⏳ **Epic 003**: Market Data Retrieval (In Progress)
 - ⏳ **Epic 004**: Trading Strategy System
 - ⏳ **Epic 005**: Trade Execution Module
 - ⏳ **Epic 006**: Main Orchestration
@@ -187,28 +232,25 @@ The project is structured into epics following an agile development approach:
 
 See `docs/epics/` for detailed epic specifications.
 
-## Saxo Configuration Module
-
-- Guide: [`docs/CONFIG_MODULE_GUIDE.md`](docs/CONFIG_MODULE_GUIDE.md)
-- Implementation: `config/config.py`
-
 ## Important Notes
 
-⚠️ **Paper Trading Only**: This bot is configured for paper trading. Never use it with a live trading account without thorough testing and understanding of the risks.
+⚠️ **Paper Trading Only**: This bot is configured for paper trading in Saxo's SIM environment. Never use it with a live trading account without thorough testing and understanding of the risks.
 
 🔒 **Security**: 
-- Never commit your `.env` file or share your API keys
+- Never commit your `.env` file or share your API credentials
 - Always use environment variables for sensitive data
-- Regenerate keys immediately if accidentally exposed
+- Regenerate credentials immediately if accidentally exposed
 - The `.env` file is already in `.gitignore`
+- OAuth tokens are stored in `.secrets/` (also in `.gitignore`)
 
 📊 **Market Hours**: 
-- The US stock market is open Monday-Friday, 9:30 AM - 4:00 PM Eastern Time
-- The bot will only execute trades during market hours
-- Check market calendar for holidays
+- Different markets have different trading hours
+- Stocks: typically 9:30 AM - 4:00 PM ET (US markets)
+- FX/Crypto: nearly 24/5 (closed weekends)
+- The bot respects `TRADING_HOURS_MODE` configuration
 
 💰 **Paper Trading**:
-- Paper trading accounts start with $100,000 in virtual cash
+- Saxo SIM accounts provide virtual cash for testing
 - All trades are simulated - no real money is used
 - Perfect for testing strategies without risk
 
@@ -225,22 +267,31 @@ See `docs/epics/` for detailed epic specifications.
 pip install -r requirements.txt
 ```
 
-**"Forbidden" or "Unauthorized" API error**
-- Check your API keys in `.env` are correct
-- Ensure you're using paper trading URL
-- Verify keys are for paper trading (not live)
-- Try regenerating keys in Alpaca dashboard
+**"SAXO_REST_BASE not found" error**
+- Check your `.env` file exists in project root
+- Verify the file is named exactly `.env` (not `.env.txt`)
+- Run `python verify_env.py` to check configuration
 
-**"Market is closed" message**
-- The bot only trades during market hours
-- Check if it's a holiday or weekend
-- View market calendar at [Alpaca Markets](https://alpaca.markets/support/calendar/)
+**OAuth authentication fails**
+- Ensure redirect URI matches exactly: `http://localhost:8765/callback`
+- Check app credentials in Saxo Developer Portal
+- Try clearing `.secrets/saxo_tokens.json` and re-authenticating
+- See `docs/OAUTH_SETUP_GUIDE.md` for detailed troubleshooting
 
-**Environment variables not loading**
-- Ensure `.env` file exists in project root
-- Check file is named exactly `.env` (not `.env.txt`)
-- Verify no spaces around `=` in `.env` file
-- Run `python verify_env.py` to check
+**"Authentication conflict detected" error**
+- You have both OAuth and manual token configured
+- Choose ONE mode: unset either `SAXO_ACCESS_TOKEN` or OAuth credentials
+- See `.env.example` for proper configuration
+
+**401 Unauthorized / Token expired**
+- Manual tokens expire after 24 hours
+- OAuth tokens refresh automatically (recommended)
+- Re-run `python scripts/saxo_login.py` if OAuth refresh fails
+
+**Instrument resolution fails**
+- Verify symbols are correct (use Saxo format: "BTCUSD" not "BTC/USD")
+- Check asset types match (Stock, Etf, FxSpot, FxCrypto)
+- UICs can be pre-configured in `WATCHLIST_JSON` to skip resolution
 
 ## Contributing
 
@@ -270,14 +321,16 @@ For issues and questions:
 
 ## Resources
 
-- [Alpaca Markets Documentation](https://alpaca.markets/docs/)
-- [Alpaca Python SDK](https://github.com/alpacahq/alpaca-trade-api-python)
-- [Paper Trading Dashboard](https://app.alpaca.markets/paper/dashboard/overview)
+- [Saxo Developer Portal](https://www.developer.saxo)
+- [Saxo OpenAPI Documentation](https://www.developer.saxo/openapi/learn)
+- [OAuth Setup Guide](docs/OAUTH_SETUP_GUIDE.md)
+- [Configuration Guide](docs/CONFIG_MODULE_GUIDE.md)
+- [Saxo Migration Guide](docs/SAXO_MIGRATION_GUIDE.md)
 
 ## Acknowledgments
 
 Built with:
-- [Alpaca Trade API](https://alpaca.markets/) - Commission-free trading API
-- [pandas](https://pandas.pydata.org/) - Data analysis library
-- [schedule](https://schedule.readthedocs.io/) - Job scheduling library
+- [Saxo Bank OpenAPI](https://www.developer.saxo) - Professional trading API
+- [requests](https://requests.readthedocs.io/) - HTTP library
 - [python-dotenv](https://github.com/theskumar/python-dotenv) - Environment variable management
+- [pytest](https://pytest.org/) - Testing framework

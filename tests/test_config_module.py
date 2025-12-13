@@ -81,6 +81,16 @@ class TestAuthentication:
             assert cfg.get_access_token() == base_manual_env["SAXO_ACCESS_TOKEN"]
             assert cfg.is_simulation() is True
 
+    def test_auth_conflict_both_configured_raises(self, base_oauth_env):
+        # Issue B from Epic 002 review: prevent auth conflict when both modes are set
+        env = dict(base_oauth_env)
+        env["SAXO_ACCESS_TOKEN"] = "test_manual_token_12345678901234567890"
+        with patch.dict(os.environ, env, clear=True):
+            with pytest.raises(ConfigurationError) as exc:
+                Config()
+            assert "conflict" in str(exc.value).lower()
+            assert "choose ONE" in str(exc.value) or "one authentication mode" in str(exc.value).lower()
+
     def test_is_simulation_false_in_live_env(self, base_manual_env):
         env = dict(base_manual_env)
         env["SAXO_ENV"] = "LIVE"
