@@ -95,15 +95,19 @@ def test_get_latest_quotes_partial_omission_missing_flag(instruments):
         ]
     }
 
-    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_response, {})):
-        result = get_latest_quotes(instruments)
+    rate = {"session": {"remaining": 100, "reset": 10}, "raw_headers": {"X-RateLimit-Session-Remaining": "100"}}
+
+    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_response, rate)):
+        result = get_latest_quotes(instruments, include_rate_limit_info=True)
 
     assert "Stock:211" in result
     assert result["Stock:211"]["quote"]["mid"] == 1.5
+    assert result["Stock:211"]["rate_limit_info"]["session"]["remaining"] == 100
 
     assert "Stock:999999" in result
     assert result["Stock:999999"]["quote"] is None
     assert result["Stock:999999"]["error"]["code"] == "MISSING_FROM_RESPONSE"
+    assert result["Stock:999999"]["rate_limit_info"]["session"]["remaining"] == 100
 
 
 def test_chart_v3_stock_bars_normalization():
@@ -199,6 +203,7 @@ def test_get_latest_quotes_invalid_instrument_emits_error_entry():
         {"asset_type": "Stock", "uic": 211, "symbol": "AAPL"},
         {"asset_type": "Stock", "symbol": "MISSING_UIC"},
         {"uic": 123, "symbol": "MISSING_ASSET_TYPE"},
+        {"asset_type": "Stock", "uic": "NOT_A_NUMBER", "symbol": "BAD_UIC"},
     ]
 
     fake_response = {
@@ -219,7 +224,12 @@ def test_get_latest_quotes_invalid_instrument_emits_error_entry():
 
     # Invalid items should not be silently dropped
     invalid_keys = [k for k, v in result.items() if v.get("error", {}).get("code") == "INVALID_INSTRUMENT_INPUT"]
-    assert len(invalid_keys) == 2
+    assert len(invalid_keys) == 3
+
+    # Error containers should preserve identifying information
+    for k in invalid_keys:
+        assert "original_input" in result[k]
+        assert result[k]["quote"] is None
 
 
 def test_quote_freshness_stale_detection():

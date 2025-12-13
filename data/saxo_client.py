@@ -59,8 +59,19 @@ class SaxoRateLimitError(SaxoAPIError):
 # =============================================================================
 
 # Minimum polling intervals (seconds) - configurable via env
-MIN_QUOTES_POLL_SECONDS = float(os.getenv("SAXO_MIN_QUOTES_POLL_SECONDS", "5"))
-MIN_BARS_POLL_SECONDS = float(os.getenv("SAXO_MIN_BARS_POLL_SECONDS", "10"))
+# NOTE: we parse defensively to avoid import-time crashes if env values are invalid.
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    try:
+        val = float(raw) if raw is not None else default
+        return max(val, 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+MIN_QUOTES_POLL_SECONDS = _float_env("SAXO_MIN_QUOTES_POLL_SECONDS", 5.0)
+MIN_BARS_POLL_SECONDS = _float_env("SAXO_MIN_BARS_POLL_SECONDS", 10.0)
 
 # Retry configuration
 MAX_RETRIES = 3

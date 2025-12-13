@@ -94,6 +94,9 @@ Freshness is stored at the **instrument container level** (not inside `quote`) s
 
 Implementation: `data.market_data.get_latest_quotes()`.
 
+Optional diagnostics:
+- pass `include_rate_limit_info=True` to attach `rate_limit_info` to each instrument container (useful for orchestrators).
+
 Behavior:
 - Instruments are grouped by `asset_type`.
 - Per `asset_type` we call `/trade/v1/infoprices/list` with a comma-separated `Uics` list.

@@ -455,6 +455,7 @@ def discover_watchlist_instruments(symbols: List[Dict[str, str]]) -> List[Dict[s
 def get_latest_quotes(
     instruments: List[Dict[str, Any]],
     field_groups: Optional[str] = None,
+    include_rate_limit_info: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch latest quote snapshots for instruments (prefer batched InfoPrices list).
 
@@ -462,6 +463,9 @@ def get_latest_quotes(
 
     Missing-from-response items are represented as explicit error entries:
         {"quote": None, "error": {"code": "MISSING_FROM_RESPONSE", ...}}
+
+    If include_rate_limit_info=True, each returned instrument container will include
+    `rate_limit_info` for the request that produced it (or empty dict for invalid inputs).
     """
 
     client = SaxoClient()
@@ -470,36 +474,61 @@ def get_latest_quotes(
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     invalid: List[Dict[str, Any]] = []
 
+    def _as_int_uic(value: Any) -> Optional[int]:
+        """Best-effort int coercion; returns None if not int-convertible."""
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     for inst in instruments:
         asset_type = inst.get("asset_type")
-        uic = inst.get("uic")
+        uic_raw = inst.get("uic")
+        uic_int = _as_int_uic(uic_raw)
+
+        # Preserve as much identifying info as possible for deterministic reconciliation.
         symbol = inst.get("symbol") or inst.get("name")
 
-        if not asset_type or uic is None:
+        if not asset_type or uic_int is None:
             # Can't request; return explicit per-item error entry
-            invalid.append({**inst, "symbol": symbol})
+            invalid.append(
+                {
+                    **inst,
+                    "asset_type": asset_type,
+                    "uic": uic_raw,
+                    "symbol": symbol,
+                }
+            )
             logger.warning("Invalid instrument input for quotes: %s", inst)
             continue
 
-        grouped.setdefault(asset_type, []).append({**inst, "symbol": symbol})
+        grouped.setdefault(asset_type, []).append({**inst, "uic": uic_int, "symbol": symbol})
 
     results: Dict[str, Dict[str, Any]] = {}
 
     # Track invalid inputs separately (stable unique keys)
     for idx, inst in enumerate(invalid):
         at = inst.get("asset_type")
-        u = inst.get("uic")
-        best_effort_id = (
-            _instrument_id(str(at), int(u))
-            if at and u is not None
-            else f"INVALID:{idx}"
-        )
+        u_raw = inst.get("uic")
 
-        results[best_effort_id] = {
+        # If both fields exist and UIC is int-convertible, we can produce a deterministic id.
+        try:
+            u_int = int(u_raw) if (at and u_raw is not None) else None
+        except (TypeError, ValueError):
+            u_int = None
+
+        best_effort_id = _instrument_id(str(at), u_int) if (at and u_int is not None) else f"INVALID:{idx}"
+
+        container: Dict[str, Any] = {
             "instrument_id": best_effort_id,
             "asset_type": at,
-            "uic": u,
+            "uic": u_raw,
             "symbol": inst.get("symbol") or inst.get("name"),
+            # Preserve raw identifying fields for deterministic reconciliation
+            "name": inst.get("name"),
+            "original_input": dict(inst),
             "quote": None,
             "bars": [],
             "data_quality": {"is_delayed": None, "is_indicative": None},
@@ -512,6 +541,11 @@ def get_latest_quotes(
             "error": {"code": "INVALID_INSTRUMENT_INPUT"},
         }
 
+        if include_rate_limit_info:
+            container["rate_limit_info"] = {}
+
+        results[best_effort_id] = container
+
     for asset_type, insts in grouped.items():
         if asset_type == "__invalid__":
             continue
@@ -521,6 +555,7 @@ def get_latest_quotes(
         uics: List[int] = []
         duplicates: List[int] = []
         for inst in insts:
+            # `uic` has already been validated/coerced to int during grouping
             uic = int(inst["uic"])
             if uic in seen:
                 duplicates.append(uic)
@@ -547,7 +582,7 @@ def get_latest_quotes(
             # Populate per-instrument errors but continue other asset types
             for inst in insts:
                 iid = _instrument_id(asset_type, int(inst["uic"]))
-                results[iid] = {
+                container: Dict[str, Any] = {
                     "instrument_id": iid,
                     "asset_type": asset_type,
                     "uic": int(inst["uic"]),
@@ -566,6 +601,9 @@ def get_latest_quotes(
                         "details": {"message": str(e)},
                     },
                 }
+                if include_rate_limit_info:
+                    container["rate_limit_info"] = getattr(e, "rate_limit_info", {}) or {}
+                results[iid] = container
             continue
 
         items = []
@@ -604,7 +642,7 @@ def get_latest_quotes(
                 dq = derive_data_quality_from_quote(normalized_quote)
                 freshness = evaluate_quote_freshness(normalized_quote)
 
-                results[iid] = {
+                container: Dict[str, Any] = {
                     "instrument_id": iid,
                     "asset_type": asset_type,
                     "uic": uic,
@@ -614,8 +652,11 @@ def get_latest_quotes(
                     "data_quality": dq,
                     "freshness": freshness,
                 }
+                if include_rate_limit_info:
+                    container["rate_limit_info"] = _rate
+                results[iid] = container
             else:
-                results[iid] = {
+                container: Dict[str, Any] = {
                     "instrument_id": iid,
                     "asset_type": asset_type,
                     "uic": uic,
@@ -638,6 +679,9 @@ def get_latest_quotes(
                         },
                     },
                 }
+                if include_rate_limit_info:
+                    container["rate_limit_info"] = _rate
+                results[iid] = container
 
     return results
 
@@ -781,5 +825,5 @@ def get_instrument_price(uic: int, asset_type: str) -> Optional[float]:
     )
 
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 __api__ = "Saxo OpenAPI"
