@@ -186,6 +186,16 @@ https://law-journals-books.vlex.com/vid/simple-technical-trading-rules-stochasti
 
 ## Saxo-Specific Considerations
 
+### SIM vs LIVE Pricing Behavior (Delayed Quotes)
+Saxo’s **SIM** environment may return **delayed quotes** for non-FX instruments. If your data-quality gate rejects any delayed quote, you may unintentionally force **everything to HOLD** during development.
+
+**Policy:** This project includes `ALLOW_DELAYED_DATA_IN_SIM` (default `true`) to allow progress in SIM while still being safe-by-default for LIVE.
+
+- In **SIM**: allow delayed quotes when `ALLOW_DELAYED_DATA_IN_SIM=true` (log a loud warning)
+- In **LIVE**: recommended to enforce `DelayedByMinutes == 0` (reject delayed)
+
+Reference: https://openapi.help.saxo/hc/en-us/articles/4416934340625
+
 ### CryptoFX Trading Hours
 
 **IMPORTANT:** Saxo CryptoFX trades **WEEKDAYS ONLY** (not 24/7).
@@ -218,6 +228,12 @@ Strategies receive `quote.MarketState` in market data:
 - `"PreMarket"` / `"AfterMarket"` - Extended hours
 
 **Default behavior:** HOLD when not "Open"
+
+## Operational Checklist (Before You Trust Signals)
+- [ ] Confirm the end-to-end flow passes `decision_time_utc` (UTC) into every strategy call
+- [ ] Confirm closed-bar filtering uses `timestamp < decision_time_utc` (no partial bars)
+- [ ] Confirm SIM delayed-data policy (`ALLOW_DELAYED_DATA_IN_SIM`) is set intentionally
+- [ ] Confirm extended-hours trading is **disabled by default** unless you explicitly opt-in
 
 ## Testing Your Strategy
 

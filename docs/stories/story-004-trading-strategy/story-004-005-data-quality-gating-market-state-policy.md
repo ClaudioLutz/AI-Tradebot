@@ -58,6 +58,9 @@ Create defensive data quality layer that:
 - [ ] `ALLOW_EXTENDED_HOURS` (default: false)
 - [ ] `DATA_STALENESS_THRESHOLD_SECONDS` (default: 300 = 5 min)
 - [ ] `REQUIRE_MARKET_OPEN` (default: true)
+- [ ] `ALLOW_DELAYED_DATA_IN_SIM` (default: true)
+  - When enabled, delayed quotes are accepted in **SAXO_ENV=SIM** for instruments where Saxo does not provide live pricing.
+  - MUST log a prominent warning when enabled.
 - [ ] `.env.example` updated with examples and warnings
 
 ## Technical Implementation Notes
@@ -74,6 +77,8 @@ inappropriate market conditions, protecting against common real-world issues.
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, NamedTuple
+import os
+
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -168,6 +173,19 @@ class DataQualityChecker:
             last_updated_str = quote.get("LastUpdated")
             is_fresh = True
             is_delayed = quote.get("DelayedByMinutes", 0) > 0
+
+            # Saxo SIM vs LIVE behavior:
+            # In SIM, delayed quotes for many non-FX instruments are expected.
+            # Policy is controlled by ALLOW_DELAYED_DATA_IN_SIM (default True).
+            saxo_env = os.getenv("SAXO_ENV", "SIM").upper()
+            allow_delayed_in_sim = os.getenv("ALLOW_DELAYED_DATA_IN_SIM", "true").lower() == "true"
+            delayed_is_acceptable = (saxo_env == "SIM" and allow_delayed_in_sim) or (not is_delayed)
+
+            if saxo_env == "SIM" and allow_delayed_in_sim:
+                logger.warning(
+                    "ALLOW_DELAYED_DATA_IN_SIM is enabled. This is recommended for SIM development "
+                    "(Saxo SIM may not offer live prices for non-FX), but should be disabled for LIVE trading."
+                )
             
             if last_updated_str:
                 try:
@@ -231,7 +249,8 @@ class DataQualityChecker:
             # Create result
             reason = "_".join(reason_parts) if reason_parts else "OK"
             is_acceptable = (
-                is_fresh and 
+                is_fresh and
+                delayed_is_acceptable and
                 (not self.require_market_open or is_market_open) and
                 (not is_extended_hours or self.allow_extended_hours) and
                 not (asset_type == "CryptoFx" and now.weekday() >= 5)

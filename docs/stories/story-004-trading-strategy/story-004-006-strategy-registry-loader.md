@@ -22,11 +22,14 @@ Build extensible strategy loading system with:
   - `STRATEGY_REGISTRY` dict mapping names to strategy classes
   - `register_strategy(name, strategy_class)` decorator/function
   - `get_strategy(name, params) -> Strategy` factory function
-  - `list_available_strategies() -> List[str]`
+  - `get_strategy_spec(name) -> StrategySpec` (exposes defaults + validator + creator)
+  - `list_available_strategies() -> List[str]` (stable + sorted)
 
 ### 2. Registration Methods
-- [ ] Manual registration for built-in strategies
 - [ ] Decorator-based registration for easy extension
+- [ ] Explicit import/discovery mechanism documented (registration happens at import time):
+  - Option A (simple): explicit imports in `strategies/__init__.py`
+  - Option B (auto-discovery): use `pkgutil.iter_modules(strategies.__path__)` to import submodules
 - [ ] Clear error messages for unknown strategies
 
 ### 3. Integration with Config Loader
@@ -103,8 +106,8 @@ def get_strategy(name: str, params: Dict[str, Any] = None) -> BaseStrategy:
 
 
 def list_available_strategies() -> List[str]:
-    """Return list of registered strategy names."""
-    return list(STRATEGY_REGISTRY.keys())
+    """Return list of registered strategy names (stable order)."""
+    return sorted(STRATEGY_REGISTRY.keys())
 
 
 # Register built-in strategies

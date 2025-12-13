@@ -88,8 +88,10 @@ if STRATEGY_THRESHOLD_BPS is not None:
 
 import logging
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+
 from config import settings
+from strategies.registry import get_strategy_spec
 
 logger = logging.getLogger(__name__)
 
@@ -129,106 +131,64 @@ def load_strategy_params(strategy_name: str) -> Dict[str, Any]:
             logger.error(f"Invalid STRATEGY_PARAMS_JSON: {e}")
             raise ValueError(f"Invalid strategy parameters JSON: {e}")
     
-    # Fall back to individual parameters (strategy-specific)
-    if strategy_name == "moving_average":
-        params = {
-            "short_window": settings.STRATEGY_SHORT_WINDOW,
-            "long_window": settings.STRATEGY_LONG_WINDOW,
-        }
-        if settings.STRATEGY_THRESHOLD_BPS is not None:
-            params["threshold_bps"] = settings.STRATEGY_THRESHOLD_BPS
-        
+    # Fall back to individual env vars (generic baseline for beginners)
+    # NOTE: Keep this generic; strategy-specific validation/defaulting lives in the strategy.
+    params = {
+        "short_window": getattr(settings, "STRATEGY_SHORT_WINDOW", None),
+        "long_window": getattr(settings, "STRATEGY_LONG_WINDOW", None),
+        "threshold_bps": getattr(settings, "STRATEGY_THRESHOLD_BPS", None),
+    }
+    # Drop None keys
+    params = {k: v for k, v in params.items() if v is not None}
+
+    if params:
         logger.info(
-            f"Loaded strategy parameters from env vars: {strategy_name} = {params}"
+            f"Loaded baseline strategy params from env vars: {strategy_name} = {params}"
         )
         return params
-    
-    # No parameters configured - use defaults
+
     logger.warning(
         f"No parameters configured for strategy '{strategy_name}', using defaults"
     )
     return {}
 
 
-def validate_moving_average_params(params: Dict[str, Any]) -> None:
-    """
-    Validate Moving Average strategy parameters.
-    
-    Args:
-        params: Dict of parameter name → value
-    
-    Raises:
-        ValueError: If any parameter is invalid
-    """
-    # Check short_window
-    if "short_window" in params:
-        short_window = params["short_window"]
-        if not isinstance(short_window, int) or short_window <= 0:
-            raise ValueError(
-                f"short_window must be positive integer, got {short_window}"
-            )
-        if short_window > 100:
-            logger.warning(
-                f"short_window={short_window} is unusually large (>100 periods)"
-            )
-    
-    # Check long_window
-    if "long_window" in params:
-        long_window = params["long_window"]
-        if not isinstance(long_window, int) or long_window <= 0:
-            raise ValueError(
-                f"long_window must be positive integer, got {long_window}"
-            )
-        if long_window > 200:
-            logger.warning(
-                f"long_window={long_window} is unusually large (>200 periods)"
-            )
-    
-    # Check relationship
-    if "short_window" in params and "long_window" in params:
-        if params["short_window"] >= params["long_window"]:
-            raise ValueError(
-                f"short_window ({params['short_window']}) must be < "
-                f"long_window ({params['long_window']})"
-            )
-    
-    # Check threshold
-    if "threshold_bps" in params:
-        threshold = params["threshold_bps"]
-        if threshold is not None:
-            if not isinstance(threshold, (int, float)) or threshold < 0:
-                raise ValueError(
-                    f"threshold_bps must be non-negative number, got {threshold}"
-                )
-            if threshold > 1000:  # 10%
-                logger.warning(
-                    f"threshold_bps={threshold} (>{10}%) is unusually large"
-                )
+# NOTE: Strategy-specific validation should live with the strategy itself.
+# Each strategy should expose:
+#   - default_params() -> Dict[str, Any]
+#   - validate_params(params: Dict[str, Any]) -> None
+# so the config loader remains generic and extensible.
 
 
 def create_strategy_from_config(strategy_name: str):
-    """
-    Factory function to create strategy from configuration.
-    
+    """Factory function to create strategy from configuration.
+
+    This function is intentionally generic: it loads user-specified params,
+    merges them with strategy defaults, validates them via the strategy’s
+    own validator, then instantiates via the registry.
+
     Args:
         strategy_name: Name of strategy to create
-    
+
     Returns:
         Initialized strategy instance
-    
+
     Raises:
         ValueError: If strategy name unknown or parameters invalid
     """
-    # Load parameters
-    params = load_strategy_params(strategy_name)
-    
-    # Create appropriate strategy
-    if strategy_name == "moving_average":
-        validate_moving_average_params(params)
-        from strategies.moving_average import MovingAverageCrossoverStrategy
-        return MovingAverageCrossoverStrategy(**params)
-    else:
-        raise ValueError(f"Unknown strategy name: {strategy_name}")
+    user_params = load_strategy_params(strategy_name)
+
+    spec = get_strategy_spec(strategy_name)
+
+    params = {
+        **spec.default_params(),
+        **user_params,
+    }
+
+    spec.validate_params(params)
+
+    logger.info(f"Final strategy params (validated): {strategy_name} = {params}")
+    return spec.create(params)
 ```
 
 ### `.env.example` Updates

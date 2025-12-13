@@ -181,13 +181,18 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             f"threshold={threshold_bps}bps, cooldown={cooldown_bars}bars"
         )
     
-    def generate_signals(self, market_data: Dict[str, dict]) -> Dict[str, Signal]:
-        """
-        Generate trading signals for all instruments using MA crossover logic.
-        
+    def generate_signals(
+        self,
+        market_data: Dict[str, dict],
+        decision_time_utc: datetime,
+    ) -> Dict[str, Signal]:
+        """Generate trading signals for all instruments using MA crossover logic.
+
         Args:
             market_data: Dict keyed by instrument_id with market data
-        
+            decision_time_utc: Strategy decision timestamp in UTC. Strategy must only
+                use bars strictly < decision_time_utc.
+
         Returns:
             Dict keyed by instrument_id with Signal objects
         """

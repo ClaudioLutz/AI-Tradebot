@@ -36,8 +36,19 @@ Build a modular strategy system in the `strategies/` folder that encapsulates tr
 - **Pure functions:** Strategies accept normalized market data, return signals (no side effects)
 - **Broker-agnostic:** Strategies do NOT know about Saxo endpoints, UICs, or AccountKeys
 - **Input:** Normalized market data dict keyed by `instrument_id` (`"{asset_type}:{uic}"`)
-- **Output:** Signals dict keyed by `instrument_id` with action: `"BUY"`, `"SELL"`, `"HOLD"`
+- **Output (epic-level contract):** `Dict[instrument_id, Signal]` where `Signal` is the rich schema from Story 004-001
+  - Orchestration / execution can convert via `signals_to_actions()` when only `"BUY"|"SELL"|"HOLD"` is needed
 - **Symbol labels:** Market data includes `symbol` field for readability, but strategies key on `instrument_id`
+
+### Decision Time (UTC) Contract (Look-Ahead Bias Prevention)
+- Strategies must receive an explicit `decision_time_utc` (UTC datetime).
+- Strategies must only use bars whose timestamps are strictly **< decision_time_utc** (UTC).
+- Each returned `Signal.decision_time` MUST equal the provided `decision_time_utc` (serialized to ISO8601), so audits are deterministic.
+
+### Saxo SIM vs LIVE Price Timing (Important)
+- Saxo SIM often provides **delayed** prices for non-FX instruments.
+- Data-quality gating must be configurable so SIM development does not become “everything HOLD” purely due to delayed quotes.
+- See Story 004-005 for `ALLOW_DELAYED_DATA_IN_SIM` policy and warnings.
 
 ### Data Contract
 Strategies consume the output from Epic 003 (market data module):
@@ -105,13 +116,14 @@ References:
 
 ## Acceptance Criteria
 1. Strategy accepts normalized market data dict keyed by `instrument_id`
-2. Strategy returns signals dict: `{instrument_id: "BUY"|"SELL"|"HOLD"}`
-3. Trading logic (e.g., Moving Average Crossover) is correctly implemented
+2. Strategy returns signals dict: `{instrument_id: Signal}` (rich schema from Story 004-001)
+3. Strategies accept explicit `decision_time_utc` and only use bars with timestamps strictly `< decision_time_utc` (UTC)
 4. Signals are generated for all instruments in market data
 5. Strategy handles missing or incomplete data gracefully (logs warning, returns HOLD)
 6. Documentation explains how to add new strategies
 7. Example demonstrates both BUY and SELL signal generation
 8. Strategy parameters can be adjusted without code changes (config or constructor args)
+9. Execution/orchestration can convert via `signals_to_actions()` when only action strings are needed
 
 ## Related Documents
 - `strategies/simple_strategy.py` (example implementation)
@@ -120,51 +132,49 @@ References:
 ## Example Strategy Interface
 
 ```python
-def generate_signals(market_data: Dict[str, Dict]) -> Dict[str, str]:
-    """
-    Analyze market data and generate trading signals.
-    
+from datetime import datetime
+from typing import Dict
+
+from strategies.base import Signal
+
+
+def generate_signals(
+    market_data: Dict[str, Dict],
+    decision_time_utc: datetime,
+) -> Dict[str, Signal]:
+    """Analyze market data and generate trading signals.
+
     Args:
-        market_data: Dict keyed by instrument_id, containing:
-            {
-                "instrument_id": str,
-                "asset_type": str,
-                "uic": int,
-                "symbol": str,  # human-readable label
-                "quote": {...},
-                "bars": [...]  # optional OHLC data
-            }
-    
+        market_data: Dict keyed by instrument_id, containing normalized quote/bars.
+        decision_time_utc: The decision timestamp in UTC.
+            Strategies must only use bars strictly < decision_time_utc.
+
     Returns:
-        Dict keyed by instrument_id with signal:
-        {
-            "Stock:211": "BUY",
-            "FxSpot:21": "SELL",
-            "FxSpot:1581": "HOLD"
-        }
-    
+        Dict keyed by instrument_id with rich Signal objects.
+
     Notes:
         - Use instrument_id as key (unique, deterministic)
         - symbol field is for logging/debugging only
-        - Return HOLD for instruments with insufficient data
+        - Return HOLD with an explanatory reason when data is insufficient
     """
-    signals = {}
-    
+    signals: Dict[str, Signal] = {}
+
     for instrument_id, data in market_data.items():
-        # Extract data
         symbol = data.get("symbol", "UNKNOWN")
         bars = data.get("bars", [])
-        
-        # Validate data availability
+
         if not bars or len(bars) < MIN_BARS_REQUIRED:
-            logger.warning(f"Insufficient data for {instrument_id} ({symbol}), returning HOLD")
-            signals[instrument_id] = "HOLD"
+            signals[instrument_id] = Signal(
+                action="HOLD",
+                reason="INSUFFICIENT_BARS",
+                timestamp=get_current_timestamp(),
+                decision_time=decision_time_utc.isoformat(),
+            )
             continue
-        
-        # Strategy logic here
-        signal = calculate_signal(bars, symbol)  # pass symbol for logging
-        signals[instrument_id] = signal
-    
+
+        # Strategy logic here (must only use bars strictly < decision_time_utc)
+        signals[instrument_id] = calculate_signal(bars, symbol, decision_time_utc)
+
     return signals
 ```
 

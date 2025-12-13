@@ -20,8 +20,9 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
 ### 1. Strategy Interface Exists
 - [ ] `strategies/base.py` created with:
   - `BaseStrategy` abstract class or protocol
-  - `generate_signals(market_data: dict) -> dict[instrument_id, Signal]` method signature
+  - `generate_signals(market_data: dict, decision_time_utc: datetime) -> dict[instrument_id, Signal]` method signature
   - Clear docstrings explaining inputs/outputs
+  - Contract: strategy may only use bars strictly **< decision_time_utc** (UTC)
 
 ### 2. Signal Schema Defined
 - [ ] `Signal` dataclass/TypedDict created with fields:
@@ -29,6 +30,7 @@ Standardize inputs/outputs and eliminate ad-hoc strategy implementations by defi
   - `reason`: str (e.g., "INSUFFICIENT_BARS", "CROSSOVER_UP", "CROSSOVER_DOWN", "NO_CROSSOVER")
   - `timestamp`: str (ISO8601 format - signal generation timestamp)
   - `decision_time`: str (bar-close time or quote last-updated time - actual data timestamp)
+  - `valid_until`: Optional[str] (ISO8601) (optional future: invalidate stale signals)
   - `confidence`: Optional[float] (0.0 to 1.0, for future use)
   - `price_ref`: Optional[float] (reference price: close, mid, bid/ask)
   - `price_type`: Optional[str] (e.g., "close", "mid", "bid", "ask")
@@ -108,6 +110,7 @@ class Signal:
     reason: str
     timestamp: str  # ISO8601 format - signal generation time
     decision_time: str  # ISO8601 format - data timestamp (bar close or quote time)
+    valid_until: Optional[str] = None
     confidence: Optional[float] = None
     price_ref: Optional[float] = None
     price_type: Optional[str] = None
@@ -134,43 +137,43 @@ class Signal:
 ### Interface Design
 ```python
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Dict
 
 class BaseStrategy(ABC):
-    """
-    Base class for all trading strategies.
-    
+    """Base class for all trading strategies.
+
     All strategies must implement generate_signals() method that:
     1. Accepts normalized market data dict keyed by instrument_id
-    2. Returns signals dict keyed by instrument_id with Signal objects
-    3. Uses only closed bars (no look-ahead bias)
-    4. Generates signals with explicit timestamps
+    2. Accepts explicit decision_time_utc (UTC) to prevent look-ahead bias
+    3. Returns signals dict keyed by instrument_id with Signal objects
+    4. Uses only bars whose timestamps are strictly < decision_time_utc
     5. Returns HOLD for instruments with insufficient data
     """
-    
+
     @abstractmethod
-    def generate_signals(self, market_data: Dict[str, dict]) -> Dict[str, Signal]:
-        """
-        Generate trading signals for all instruments in market_data.
-        
+    def generate_signals(
+        self,
+        market_data: Dict[str, dict],
+        decision_time_utc: datetime,
+    ) -> Dict[str, Signal]:
+        """Generate trading signals for all instruments in market_data.
+
         Args:
-            market_data: Dict keyed by instrument_id, containing:
-                {
-                    "instrument_id": str,
-                    "asset_type": str,
-                    "uic": int,
-                    "symbol": str,
-                    "quote": {...},
-                    "bars": [...]  # optional OHLC data with timestamps
-                }
-        
+            market_data: Dict keyed by instrument_id, containing normalized quote/bars.
+            decision_time_utc: The decision timestamp in UTC. Strategy must only use
+                bars strictly < decision_time_utc.
+
         Returns:
-            Dict keyed by instrument_id with Signal objects
-        
+            Dict keyed by instrument_id with Signal objects.
+
         Raises:
             ValueError: If market_data structure is invalid
         """
-        pass
+        raise NotImplementedError
+```
+
+```python
 
 def signals_to_actions(signals: Dict[str, Signal]) -> Dict[str, str]:
     """

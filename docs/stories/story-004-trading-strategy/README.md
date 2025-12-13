@@ -109,6 +109,7 @@ Stories should be implemented in sequence as each builds on the previous:
 
 ### 1. Correct Market Availability (Saxo-Specific)
 - **CryptoFX trades weekdays only** (not 24/7)
+- **SIM may provide delayed prices for non-FX**; allow delayed in SIM via policy to avoid “everything HOLD”
 - Extended hours have lower liquidity and higher volatility
 - References: Saxo Developer Portal, Saxo Help
 

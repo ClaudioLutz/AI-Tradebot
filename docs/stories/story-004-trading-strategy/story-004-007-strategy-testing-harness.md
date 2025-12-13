@@ -55,6 +55,9 @@ Provides deterministic, reusable market data scenarios for strategy unit tests.
 """
 
 from datetime import datetime, timezone, timedelta
+
+# IMPORTANT: Prefer fixed timestamps in fixtures to keep tests deterministic.
+# Avoid datetime.now() for bars/quotes unless the test explicitly targets "freshness" logic.
 from typing import List, Dict
 
 def create_mock_market_data(
@@ -83,7 +86,8 @@ def create_mock_market_data(
     Returns:
         Mock market data dict matching Epic 003 format
     """
-    now = datetime.now(timezone.utc)
+    # Fixed base time to keep fixtures deterministic
+    now = datetime.fromisoformat("2025-01-01T00:00:00+00:00")
     last_updated = now if is_fresh else now - timedelta(minutes=10)
     
     bars = []
