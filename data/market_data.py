@@ -73,13 +73,24 @@ def _isoformat(dt: datetime) -> str:
 
 
 def _parse_iso8601(value: Optional[str]) -> Optional[datetime]:
+    """Parse ISO-8601 timestamps from Saxo.
+
+    If a timezone offset is missing and parsing yields a naive datetime,
+    we assume UTC to avoid downstream `.astimezone()` failures.
+    """
+
     if not value:
         return None
-    # Saxo commonly returns ISO-8601 with Z
+
     try:
+        # Saxo commonly returns ISO-8601 with Z
         if value.endswith("Z"):
             value = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(value)
+
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -457,15 +468,16 @@ def get_latest_quotes(
 
     # Group instruments by asset_type
     grouped: Dict[str, List[Dict[str, Any]]] = {}
+    invalid: List[Dict[str, Any]] = []
+
     for inst in instruments:
         asset_type = inst.get("asset_type")
         uic = inst.get("uic")
         symbol = inst.get("symbol") or inst.get("name")
 
         if not asset_type or uic is None:
-            # Can't request; return error entry
-            instrument_id = _instrument_id(str(asset_type), int(uic)) if uic is not None else "UNKNOWN"
-            grouped.setdefault("__invalid__", [])
+            # Can't request; return explicit per-item error entry
+            invalid.append({**inst, "symbol": symbol})
             logger.warning("Invalid instrument input for quotes: %s", inst)
             continue
 
@@ -473,12 +485,20 @@ def get_latest_quotes(
 
     results: Dict[str, Dict[str, Any]] = {}
 
-    # Track invalid inputs separately
-    for inst in grouped.get("__invalid__", []):
-        results["UNKNOWN"] = {
-            "instrument_id": "UNKNOWN",
-            "asset_type": inst.get("asset_type"),
-            "uic": inst.get("uic"),
+    # Track invalid inputs separately (stable unique keys)
+    for idx, inst in enumerate(invalid):
+        at = inst.get("asset_type")
+        u = inst.get("uic")
+        best_effort_id = (
+            _instrument_id(str(at), int(u))
+            if at and u is not None
+            else f"INVALID:{idx}"
+        )
+
+        results[best_effort_id] = {
+            "instrument_id": best_effort_id,
+            "asset_type": at,
+            "uic": u,
             "symbol": inst.get("symbol") or inst.get("name"),
             "quote": None,
             "bars": [],
@@ -650,6 +670,7 @@ def get_ohlc_bars(
     time: Optional[str] = None,
     field_groups: Optional[str] = None,
     existing_bars: Optional[List[Dict[str, Any]]] = None,
+    include_rate_limit_info: bool = False,
 ) -> Dict[str, Any]:
     """Fetch OHLC bars for a single instrument using Saxo Chart v3.
 
@@ -690,7 +711,7 @@ def get_ohlc_bars(
     logger.debug("Requesting Chart v3 bars for %s params=%s", instrument_id, params)
 
     try:
-        data, _rate = client.get_with_headers(
+        data, rate_info = client.get_with_headers(
             "/chart/v3/charts", params=params, endpoint_type="bars"
         )
     except SaxoAPIError as e:
@@ -729,13 +750,21 @@ def get_ohlc_bars(
             len(normalized_new),
         )
 
-    return {
+    out: Dict[str, Any] = {
         "instrument_id": instrument_id,
         "asset_type": asset_type,
         "uic": uic_int,
         "symbol": symbol,
         "bars": merged,
+        "requested_count": int(count),
+        "returned_count": int(len(normalized_new)),
+        "freshness": evaluate_bar_freshness(merged, horizon_minutes=horizon_minutes),
     }
+
+    if include_rate_limit_info:
+        out["rate_limit_info"] = rate_info
+
+    return out
 
 
 # =============================================================================

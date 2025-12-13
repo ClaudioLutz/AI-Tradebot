@@ -111,6 +111,11 @@ Important: **partial omission semantics**
 
 Implementation: `data.market_data.get_ohlc_bars()`.
 
+Return shape includes:
+- `bars`: merged list (optionally merged with `existing_bars`)
+- `freshness`: bar freshness block (see Freshness section)
+- `requested_count` / `returned_count`: useful for orchestration / diagnostics
+
 Key points:
 - We use `/chart/v3/charts` (Chart v1 is deprecated).
 - `Horizon` is **minutes per bar**.
@@ -193,4 +198,5 @@ print(quotes["Stock:211"]["quote"]["mid"])
 
 bars_out = get_ohlc_bars(watchlist[0], horizon_minutes=5, count=60, mode="UpTo")
 print(len(bars_out["bars"]))
+print(bars_out["freshness"])  # bar freshness block
 ```

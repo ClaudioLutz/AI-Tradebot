@@ -16,6 +16,7 @@ import pytest
 from data.market_data import (
     SUPPORTED_HORIZON_MINUTES,
     derive_data_quality_from_quote,
+    evaluate_bar_freshness,
     evaluate_quote_freshness,
     get_latest_quotes,
     get_ohlc_bars,
@@ -23,6 +24,24 @@ from data.market_data import (
     normalize_quote_from_infoprice,
 )
 from data.saxo_client import parse_rate_limit_headers
+
+
+def test_parse_iso8601_naive_timestamp_assumes_utc():
+    # Saxo normally returns 'Z', but if it ever returns naive timestamps
+    # we should treat them as UTC instead of raising.
+    quote = {
+        "bid": 1.0,
+        "ask": 1.1,
+        "mid": 1.05,
+        "last_updated": "2025-12-13T08:00:00",  # naive
+        "delayed_by_minutes": 0,
+        "market_state": "Open",
+    }
+    now = datetime(2025, 12, 13, 8, 10, 0, tzinfo=timezone.utc)
+
+    fresh = evaluate_quote_freshness(quote, now=now, stale_quote_seconds=300)
+    assert fresh["age_seconds"] == pytest.approx(600.0)
+    assert fresh["is_stale"] is True
 
 
 @pytest.fixture
@@ -148,6 +167,15 @@ def test_missing_bars_warning_and_returned_count(caplog):
             out = get_ohlc_bars(inst, horizon_minutes=1, count=60)
 
     assert len(out["bars"]) == 2
+    assert out["requested_count"] == 60
+    assert out["returned_count"] == 2
+
+    # Freshness uses `now=datetime.now()` internally, so compare with tolerance
+    expected = evaluate_bar_freshness(out["bars"], horizon_minutes=1)
+    assert out["freshness"]["is_stale"] == expected["is_stale"]
+    assert out["freshness"]["reason"] == expected["reason"]
+    assert out["freshness"]["age_seconds"] == pytest.approx(expected["age_seconds"], rel=0, abs=0.5)
+
     assert any("Illiquid/missing bars normal case" in r.message for r in caplog.records)
 
 
@@ -164,6 +192,34 @@ def test_rate_limit_header_parsing_multi_dimension():
     assert parsed["session"]["reset"] == 45
     assert parsed["appday"]["remaining"] == 9500
     assert parsed["appday"]["reset"] == 3600
+
+
+def test_get_latest_quotes_invalid_instrument_emits_error_entry():
+    instruments = [
+        {"asset_type": "Stock", "uic": 211, "symbol": "AAPL"},
+        {"asset_type": "Stock", "symbol": "MISSING_UIC"},
+        {"uic": 123, "symbol": "MISSING_ASSET_TYPE"},
+    ]
+
+    fake_response = {
+        "Data": [
+            {
+                "Uic": 211,
+                "LastUpdated": "2025-12-13T08:30:00Z",
+                "Quote": {"Bid": 1, "Ask": 2, "Mid": 1.5, "DelayedByMinutes": 0, "MarketState": "Open"},
+            }
+        ]
+    }
+
+    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_response, {})):
+        result = get_latest_quotes(instruments)
+
+    # Valid key present
+    assert "Stock:211" in result
+
+    # Invalid items should not be silently dropped
+    invalid_keys = [k for k, v in result.items() if v.get("error", {}).get("code") == "INVALID_INSTRUMENT_INPUT"]
+    assert len(invalid_keys) == 2
 
 
 def test_quote_freshness_stale_detection():

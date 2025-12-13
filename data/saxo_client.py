@@ -58,9 +58,9 @@ class SaxoRateLimitError(SaxoAPIError):
 # Rate Limit Configuration (Story 003-004)
 # =============================================================================
 
-# Minimum polling intervals (seconds) - configurable
-MIN_QUOTES_POLL_SECONDS = 5
-MIN_BARS_POLL_SECONDS = 10
+# Minimum polling intervals (seconds) - configurable via env
+MIN_QUOTES_POLL_SECONDS = float(os.getenv("SAXO_MIN_QUOTES_POLL_SECONDS", "5"))
+MIN_BARS_POLL_SECONDS = float(os.getenv("SAXO_MIN_BARS_POLL_SECONDS", "10"))
 
 # Retry configuration
 MAX_RETRIES = 3
