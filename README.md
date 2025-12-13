@@ -325,6 +325,7 @@ For issues and questions:
 - [Saxo OpenAPI Documentation](https://www.developer.saxo/openapi/learn)
 - [OAuth Setup Guide](docs/OAUTH_SETUP_GUIDE.md)
 - [Configuration Guide](docs/CONFIG_MODULE_GUIDE.md)
+- [Market Data Guide](docs/MARKET_DATA_GUIDE.md)
 - [Saxo Migration Guide](docs/SAXO_MIGRATION_GUIDE.md)
 
 ## Acknowledgments
