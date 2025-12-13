@@ -152,7 +152,18 @@ class Config:
             return "****"
 
     def is_simulation(self) -> bool:
-        return self.environment == "SIM" or "/sim/" in self.base_url.lower()
+        """Return True when running against Saxo's simulation environment.
+
+        Primary source of truth is `SAXO_ENV` (normalized to `self.environment`).
+        As a secondary fallback (for misconfigured envs), we infer from the base URL.
+        """
+        if self.environment == "SIM":
+            return True
+
+        # Fallback: infer from common Saxo SIM URL patterns.
+        # Use a conservative check to avoid false positives from arbitrary '/sim/' substrings.
+        url = (self.base_url or "").lower().rstrip("/")
+        return "/sim/openapi" in url or url.endswith("/sim")
 
     def is_production(self) -> bool:
         return not self.is_simulation()

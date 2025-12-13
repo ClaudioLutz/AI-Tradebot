@@ -79,6 +79,24 @@ class TestAuthentication:
             cfg = Config()
             assert cfg.is_manual_mode()
             assert cfg.get_access_token() == base_manual_env["SAXO_ACCESS_TOKEN"]
+            assert cfg.is_simulation() is True
+
+    def test_is_simulation_false_in_live_env(self, base_manual_env):
+        env = dict(base_manual_env)
+        env["SAXO_ENV"] = "LIVE"
+        env["SAXO_REST_BASE"] = "https://gateway.saxobank.com/openapi"  # no /sim/ marker
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Config()
+            assert cfg.is_simulation() is False
+            assert cfg.is_production() is True
+
+    def test_is_simulation_fallback_detects_sim_from_base_url(self, base_manual_env):
+        env = dict(base_manual_env)
+        env["SAXO_ENV"] = "LIVE"  # misconfigured env
+        env["SAXO_REST_BASE"] = "https://gateway.saxobank.com/sim/openapi"
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Config()
+            assert cfg.is_simulation() is True
 
     def test_oauth_mode_detection_requires_token_file(self, base_oauth_env):
         # config validates token file exists in OAuth mode
