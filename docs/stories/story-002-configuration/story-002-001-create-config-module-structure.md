@@ -67,14 +67,15 @@ class Config:
     
     Attributes:
         base_url: Saxo OpenAPI base URL
-        access_token: Saxo API access token
+        auth_mode: Authentication mode ('oauth' or 'manual')
         environment: Trading environment (SIM or LIVE)
-        watchlist: List of instruments to monitor
+        watchlist: List of structured instruments to monitor
         default_timeframe: Default timeframe for market data
         dry_run: Whether to run in simulation mode
     
     Example:
         config = Config()
+        token = config.get_access_token()  # Works for both OAuth and manual mode
         if config.is_valid():
             print(f"Environment: {config.environment}")
     """

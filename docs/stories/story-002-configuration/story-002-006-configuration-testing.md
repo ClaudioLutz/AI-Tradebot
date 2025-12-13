@@ -1,21 +1,25 @@
 # Story 002-006: Configuration Module Testing
 
 ## Story Overview
-Create comprehensive unit tests for the configuration module to ensure all functionality works correctly and configuration validation is robust.
+Create comprehensive unit tests for the configuration module to ensure all functionality works correctly, including Saxo-specific OAuth authentication, structured watchlists, and multi-asset support.
 
 ## Parent Epic
 [Epic 002: Configuration Module Development](../../epics/epic-002-configuration-module.md)
 
 ## User Story
 **As a** developer  
-**I want to** have comprehensive tests for the configuration module  
-**So that** I can ensure configuration works reliably and catch regressions early
+**I want to** have comprehensive tests for the configuration module with OAuth and Saxo-specific features  
+**So that** I can ensure configuration works reliably with both auth modes and catch regressions early
 
 ## Acceptance Criteria
 - [ ] Unit tests for all configuration methods
+- [ ] Tests for OAuth and manual token auth modes
+- [ ] Tests for structured watchlist (AssetType + UIC)
 - [ ] Tests for valid and invalid configurations
 - [ ] Tests for environment variable overrides
-- [ ] Tests for validation logic
+- [ ] Tests for Saxo-specific validation logic
+- [ ] Tests for asset-class-specific sizing
+- [ ] Tests for trading hours modes
 - [ ] Tests for helper methods
 - [ ] 80%+ code coverage for config module
 - [ ] All tests pass successfully
@@ -42,20 +46,21 @@ Create comprehensive unit tests for the configuration module to ensure all funct
    - Environment detection
    - Base URL handling
 
-3. **Watchlist Tests**
-   - Default watchlist loading
+3. **Watchlist Tests (Saxo-Specific)**
+   - Structured watchlist loading ({symbol, asset_type, uic})
    - Custom watchlist from environment
+   - Instrument resolution
+   - Crypto symbol format validation (no slashes)
+   - Crypto asset type validation (FxSpot/FxCrypto)
    - Symbol validation
-   - Add/remove symbols
-   - Stock/crypto filtering
 
-4. **Trading Settings Tests**
+4. **Trading Settings Tests (Saxo-Specific)**
    - Default settings loading
    - Environment overrides
    - Settings validation
    - Trading mode checks
-   - Position sizing
-   - Trading hours
+   - Asset-class-specific position sizing (Stock vs FX)
+   - Trading hours modes (fixed/always/instrument)
 
 5. **Validation Tests**
    - Valid configuration passes
@@ -110,15 +115,69 @@ class TestConfigInitialization:
                 Config()
             assert "SAXO_REST_BASE" in str(exc_info.value)
     
-    def test_missing_access_token_raises_error(self):
-        """Test that missing SAXO_ACCESS_TOKEN raises error."""
+    def test_oauth_mode_missing_token_file_raises_error(self):
+        """Test that OAuth mode without token file raises error."""
+        with patch.dict(os.environ, {
+            'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
+            'SAXO_APP_KEY': 'test_app_key',
+            'SAXO_APP_SECRET': 'test_app_secret',
+            'SAXO_REDIRECT_URI': 'http://localhost:8080/callback'
+        }, clear=True):
+            with pytest.raises(ConfigurationError) as exc_info:
+                Config()
+            assert "token file not found" in str(exc_info.value).lower()
+    
+    def test_manual_mode_missing_token_raises_error(self):
+        """Test that manual mode without SAXO_ACCESS_TOKEN raises error."""
         with patch.dict(os.environ, {
             'SAXO_REST_BASE': 'https://gateway.saxobank.com/sim/openapi',
             'SAXO_ACCESS_TOKEN': ''
         }, clear=True):
             with pytest.raises(ConfigurationError) as exc_info:
                 Config()
-            assert "SAXO_ACCESS_TOKEN" in str(exc_info.value)
+            assert "access" in str(exc_info.value).lower() or "token" in str(exc_info.value).lower()
+
+
+class TestAuthentication:
+    """Test API authentication (OAuth and manual token modes)."""
+    
+    def test_oauth_mode_detection(self):
+        """Test OAuth mode is detected when app credentials present."""
+        with patch.dict(os.environ, {
+            'SAXO_APP_KEY': 'test_app_key',
+            'SAXO_APP_SECRET': 'test_app_secret'
+        }):
+            # Mock token file existence
+            with patch('os.path.exists', return_value=True):
+                config = Config()
+                assert config.auth_mode == "oauth"
+    
+    def test_manual_mode_detection(self):
+        """Test manual mode is detected when only access token present."""
+        with patch.dict(os.environ, {
+            'SAXO_ACCESS_TOKEN': 'test_token_12345'
+        }, clear=False):
+            config = Config()
+            assert config.auth_mode == "manual"
+    
+    def test_get_access_token_oauth_mode(self):
+        """Test get_access_token() in OAuth mode."""
+        # Mock OAuth token retrieval
+        with patch('os.path.exists', return_value=True):
+            with patch('builtins.open', mock_open(read_data='{"access_token": "oauth_token"}')):
+                config = Config()
+                if config.auth_mode == "oauth":
+                    token = config.get_access_token()
+                    assert token is not None
+    
+    def test_get_access_token_manual_mode(self):
+        """Test get_access_token() in manual mode."""
+        test_token = "manual_token_12345"
+        with patch.dict(os.environ, {'SAXO_ACCESS_TOKEN': test_token}):
+            config = Config()
+            if config.auth_mode == "manual":
+                token = config.get_access_token()
+                assert token == test_token
 
 
 class TestCredentials:
@@ -151,78 +210,82 @@ class TestCredentials:
         with patch.dict(os.environ, {'SAXO_ENV': 'LIVE'}):
             config = Config()
             assert config.environment == 'LIVE'
+    
+    def test_auth_mode_in_summary(self):
+        """Test auth mode included in configuration summary."""
+        config = Config()
+        summary = config.get_summary()
+        assert 'auth_mode' in summary
+        assert summary['auth_mode'] in ['oauth', 'manual']
 
 
 class TestWatchlist:
-    """Test watchlist configuration and management."""
+    """Test structured watchlist configuration (Saxo-specific)."""
     
-    def test_default_watchlist_loaded(self):
-        """Test that default watchlist is loaded."""
+    def test_structured_watchlist_format(self):
+        """Test that watchlist uses structured format."""
         config = Config()
         assert len(config.watchlist) > 0
-        assert 'AAPL' in config.watchlist
-        assert 'BTC/USD' in config.watchlist or 'ETH/USD' in config.watchlist
+        
+        # Check first instrument has required fields
+        first_inst = config.watchlist[0]
+        assert 'symbol' in first_inst
+        assert 'asset_type' in first_inst
+        # UIC may be None if not yet resolved
     
-    def test_custom_watchlist_from_environment(self):
-        """Test loading custom watchlist from environment."""
-        with patch.dict(os.environ, {'WATCHLIST': 'AAPL,MSFT,GOOGL'}):
-            config = Config()
-            assert config.watchlist == ['AAPL', 'MSFT', 'GOOGL']
-    
-    def test_stock_symbols_filtering(self):
-        """Test filtering stock symbols from watchlist."""
+    def test_instrument_with_uic(self):
+        """Test instrument with resolved UIC."""
         config = Config()
-        stocks = config.get_stock_symbols()
-        assert all('/' not in symbol for symbol in stocks)
+        # Find an instrument with UIC
+        resolved = [inst for inst in config.watchlist if inst.get('uic') is not None]
+        if resolved:
+            inst = resolved[0]
+            assert isinstance(inst['uic'], int)
+            assert inst['uic'] > 0
     
-    def test_crypto_symbols_filtering(self):
-        """Test filtering crypto symbols from watchlist."""
+    def test_crypto_no_slash_format(self):
+        """Test that crypto symbols use no-slash format (BTCUSD not BTC/USD)."""
         config = Config()
-        crypto = config.get_crypto_symbols()
-        assert all('/' in symbol for symbol in crypto)
+        crypto_instruments = [
+            inst for inst in config.watchlist 
+            if inst.get('asset_type') in ['FxSpot', 'FxCrypto']
+        ]
+        
+        for inst in crypto_instruments:
+            symbol = inst.get('symbol', '')
+            assert '/' not in symbol, f"Crypto symbol {symbol} should not contain slash"
     
-    def test_add_symbol_success(self):
-        """Test successfully adding a symbol."""
+    def test_crypto_asset_type_validation(self):
+        """Test that crypto uses FxSpot or FxCrypto asset type."""
         config = Config()
-        initial_count = len(config.watchlist)
-        config.add_symbol('NVDA')
-        assert len(config.watchlist) == initial_count + 1
-        assert 'NVDA' in config.watchlist
+        crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'ADA']
+        
+        for inst in config.watchlist:
+            symbol = inst.get('symbol', '')
+            if any(symbol.startswith(crypto) for crypto in crypto_symbols):
+                assert inst.get('asset_type') in ['FxSpot', 'FxCrypto'], \
+                    f"Crypto {symbol} should have FxSpot or FxCrypto asset type"
     
-    def test_add_duplicate_symbol_raises_error(self):
-        """Test that adding duplicate symbol raises error."""
+    def test_watchlist_by_asset_type(self):
+        """Test filtering watchlist by asset type."""
         config = Config()
-        existing_symbol = config.watchlist[0]
-        with pytest.raises(ConfigurationError) as exc_info:
-            config.add_symbol(existing_symbol)
-        assert "already in watchlist" in str(exc_info.value)
+        
+        stocks = [inst for inst in config.watchlist if inst.get('asset_type') == 'Stock']
+        fx = [inst for inst in config.watchlist if inst.get('asset_type') in ['FxSpot', 'FxCrypto']]
+        
+        # Should have some instruments
+        assert len(stocks) + len(fx) > 0
     
-    def test_remove_symbol_success(self):
-        """Test successfully removing a symbol."""
-        config = Config()
-        symbol_to_remove = config.watchlist[0]
-        config.remove_symbol(symbol_to_remove)
-        assert symbol_to_remove not in config.watchlist
-    
-    def test_remove_nonexistent_symbol_raises_error(self):
-        """Test that removing non-existent symbol raises error."""
-        config = Config()
-        with pytest.raises(ConfigurationError) as exc_info:
-            config.remove_symbol('NONEXISTENT')
-        assert "not in watchlist" in str(exc_info.value)
-    
-    def test_watchlist_summary(self):
-        """Test watchlist summary generation."""
+    def test_watchlist_summary_structure(self):
+        """Test watchlist summary includes Saxo-specific info."""
         config = Config()
         summary = config.get_watchlist_summary()
-        assert 'total_symbols' in summary
-        assert 'stocks' in summary
-        assert 'crypto' in summary
-        assert summary['total_symbols'] == len(config.watchlist)
+        assert 'total_instruments' in summary
+        assert 'resolved_count' in summary or 'instrument_count' in summary
 
 
 class TestTradingSettings:
-    """Test trading settings configuration."""
+    """Test trading settings configuration (Saxo asset-class-specific)."""
     
     def test_default_settings_loaded(self):
         """Test that default settings are loaded correctly."""
@@ -258,37 +321,86 @@ class TestTradingSettings:
         assert not config.is_live_trading()
         assert config.get_trading_mode() == 'DRY_RUN'
     
-    def test_position_size_calculation(self):
-        """Test position size calculation."""
+    def test_asset_specific_position_sizing_stock(self):
+        """Test position sizing for stocks (USD value)."""
+        config = Config()
+        stock_inst = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
+        price = 175.0
+        
+        position_value = config.get_position_size_for_asset(stock_inst, price, risk_pct=1.0)
+        assert position_value > 0
+        assert position_value <= config.max_portfolio_exposure
+    
+    def test_asset_specific_position_sizing_fx(self):
+        """Test position sizing for FX/Crypto (notional amount)."""
+        config = Config()
+        crypto_inst = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+        price = 43000.0
+        
+        notional = config.get_position_size_for_asset(crypto_inst, price, risk_pct=1.0)
+        assert notional > 0
+        assert notional <= config.max_portfolio_exposure
+    
+    def test_calculate_shares_for_stock(self):
+        """Test calculating shares for stock orders."""
         config = Config()
         price = 150.0
-        position_1pct = config.calculate_position_size(price, risk_pct=1.0)
-        position_5pct = config.calculate_position_size(price, risk_pct=5.0)
         
-        assert position_1pct < position_5pct
-        assert position_1pct <= config.max_portfolio_exposure
+        shares = config.calculate_shares_for_stock(price, risk_pct=1.0)
+        assert isinstance(shares, int)
+        assert shares >= 1  # Minimum 1 share
     
-    def test_trading_hours_check(self):
-        """Test trading hours validation."""
-        config = Config()
-        # Within hours (14-21 UTC)
-        assert config.is_within_trading_hours(15)
-        assert config.is_within_trading_hours(20)
-        # Outside hours
-        assert not config.is_within_trading_hours(10)
-        assert not config.is_within_trading_hours(22)
+    def test_trading_hours_fixed_mode(self):
+        """Test trading hours in fixed mode."""
+        with patch.dict(os.environ, {'TRADING_HOURS_MODE': 'fixed'}):
+            config = Config()
+            stock = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
+            
+            # Within hours (14-21 UTC default)
+            assert config.is_trading_allowed(stock, 15)
+            # Outside hours
+            assert not config.is_trading_allowed(stock, 22)
+    
+    def test_trading_hours_always_mode(self):
+        """Test trading hours in always mode (24/7)."""
+        with patch.dict(os.environ, {'TRADING_HOURS_MODE': 'always'}):
+            config = Config()
+            crypto = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+            
+            # Should allow trading at any hour
+            assert config.is_trading_allowed(crypto, 3)
+            assert config.is_trading_allowed(crypto, 15)
+            assert config.is_trading_allowed(crypto, 22)
+    
+    def test_trading_hours_instrument_mode(self):
+        """Test trading hours in instrument mode (per-asset)."""
+        with patch.dict(os.environ, {'TRADING_HOURS_MODE': 'instrument'}):
+            config = Config()
+            stock = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
+            crypto = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+            
+            # Stock uses fixed hours
+            assert config.is_trading_allowed(stock, 15)
+            assert not config.is_trading_allowed(stock, 22)
+            
+            # Crypto uses 24/5 (weekdays only) - mock weekday
+            with patch('datetime.datetime') as mock_dt:
+                mock_dt.utcnow.return_value.weekday.return_value = 2  # Wednesday
+                assert config.is_trading_allowed(crypto, 3)
     
     def test_trading_settings_summary(self):
-        """Test trading settings summary."""
+        """Test trading settings summary (Saxo-specific)."""
         config = Config()
         summary = config.get_trading_settings_summary()
         assert 'trading_mode' in summary
         assert 'default_timeframe' in summary
-        assert 'max_position_size' in summary
+        assert 'max_position_value_usd' in summary
+        assert 'max_fx_notional' in summary
+        assert 'trading_hours_mode' in summary
 
 
 class TestValidation:
-    """Test configuration validation logic."""
+    """Test configuration validation logic (Saxo-specific)."""
     
     def test_valid_configuration_passes(self):
         """Test that valid configuration passes validation."""
@@ -312,13 +424,68 @@ class TestValidation:
                 Config()
             assert "stop_loss_pct" in str(exc_info.value)
     
-    def test_symbol_validation(self):
-        """Test symbol validation."""
+    def test_symbol_validation_no_slashes(self):
+        """Test symbol validation rejects slashes (Saxo crypto format)."""
         config = Config()
         assert config.validate_symbol('AAPL')
-        assert config.validate_symbol('BTC/USD')
+        assert config.validate_symbol('BTCUSD')  # No slash - correct
+        assert not config.validate_symbol('BTC/USD')  # Slash - invalid for Saxo
         assert not config.validate_symbol('ABC@123')
         assert not config.validate_symbol('')
+    
+    def test_crypto_format_validation(self):
+        """Test that crypto symbols without slashes pass validation."""
+        config = Config()
+        config.watchlist = [
+            {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680},
+            {"symbol": "ETHUSD", "asset_type": "FxSpot", "uic": 24681}
+        ]
+        
+        # Should not raise error
+        config._validate_crypto_symbol_format()
+    
+    def test_crypto_format_validation_rejects_slashes(self):
+        """Test that crypto symbols with slashes fail validation."""
+        config = Config()
+        config.watchlist = [
+            {"symbol": "BTC/USD", "asset_type": "FxSpot", "uic": 24680}
+        ]
+        
+        with pytest.raises(ConfigurationError) as exc_info:
+            config._validate_crypto_symbol_format()
+        assert "slash" in str(exc_info.value).lower()
+    
+    def test_instrument_resolution_validation(self):
+        """Test instrument resolution validation."""
+        config = Config()
+        # Create watchlist with unresolved instrument
+        config.watchlist = [
+            {"symbol": "AAPL", "asset_type": "Stock", "uic": None}
+        ]
+        
+        with pytest.raises(ConfigurationError) as exc_info:
+            config._validate_instrument_resolution()
+        assert "unresolved" in str(exc_info.value).lower()
+    
+    def test_auth_mode_validation_oauth(self):
+        """Test OAuth mode validation."""
+        with patch.dict(os.environ, {
+            'SAXO_APP_KEY': 'test_key',
+            'SAXO_APP_SECRET': 'test_secret'
+        }):
+            with patch('os.path.exists', return_value=True):
+                config = Config()
+                # Should not raise if token file exists
+                config._validate_auth_mode()
+    
+    def test_auth_mode_validation_manual(self):
+        """Test manual token mode validation."""
+        with patch.dict(os.environ, {
+            'SAXO_ACCESS_TOKEN': 'test_token'
+        }):
+            config = Config()
+            # Should not raise if token set
+            config._validate_auth_mode()
     
     def test_configuration_health_check(self):
         """Test configuration health check."""
@@ -343,16 +510,29 @@ class TestExport:
         config = Config()
         exported = config.export_configuration(include_sensitive=True)
         # Full token should be present (be careful with this!)
-        assert exported['api']['token'] == config.access_token
+        token = config.get_access_token()
+        assert exported['api']['token'] == token
+    
+    def test_export_includes_auth_mode(self):
+        """Test that export includes auth mode."""
+        config = Config()
+        exported = config.export_configuration()
+        assert 'auth_mode' in exported['api']
+        assert exported['api']['auth_mode'] in ['oauth', 'manual']
     
     def test_export_has_all_sections(self):
-        """Test that export includes all configuration sections."""
+        """Test that export includes all configuration sections (Saxo-specific)."""
         config = Config()
         exported = config.export_configuration()
         assert 'api' in exported
         assert 'watchlist' in exported
         assert 'trading_settings' in exported
         assert 'risk_management' in exported
+        
+        # Check Saxo-specific fields
+        assert 'auth_mode' in exported['api']
+        assert 'instruments' in exported['watchlist'] or 'watchlist' in exported
+        assert 'max_fx_notional' in exported['risk_management']
     
     def test_save_configuration_to_file(self):
         """Test saving configuration to file."""
@@ -481,12 +661,41 @@ with tempfile.NamedTemporaryFile() as f:
 5. Validation tests (safety)
 6. Export tests (debugging)
 
+## Test Environment Setup
+
+### OAuth Mode Testing
+For OAuth mode tests, you may need to:
+1. Mock token file existence: `patch('os.path.exists', return_value=True)`
+2. Mock token file content: `patch('builtins.open', mock_open(read_data='{"access_token": "test"}'))`
+3. Mock token refresh: `patch.object(SaxoOAuth, 'refresh_access_token')`
+
+### Manual Mode Testing
+For manual mode tests:
+1. Set `SAXO_ACCESS_TOKEN` in patched environment
+2. Clear OAuth credentials to force manual mode
+
+### Structured Watchlist Testing
+Use test fixtures with proper structure:
+```python
+@pytest.fixture
+def sample_watchlist():
+    return [
+        {"symbol": "AAPL", "asset_type": "Stock", "uic": 211},
+        {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+    ]
+```
+
 ## Continuous Integration
 These tests should be run:
 - On every commit
 - Before merging to main branch
 - As part of CI/CD pipeline
 - Before releases
+
+### CI Test Matrix
+Test against both auth modes:
+- OAuth mode (with mocked token file)
+- Manual token mode (with environment variable)
 
 ## Architecture Notes
 - **Test Isolation:** Use mocking to avoid dependencies
@@ -503,15 +712,20 @@ These tests should be run:
 
 ## References
 - Parent Epic: `docs/epics/epic-002-configuration-module.md`
+- EPIC-002 Revision Summary: `docs/EPIC-002-REVISION-SUMMARY.md`
 - [Pytest Documentation](https://docs.pytest.org/)
 - [Python Testing Best Practices](https://realpython.com/pytest-python-testing/)
+- [Saxo OAuth Documentation](https://developer.saxobank.com/openapi/learn/oauth-authorization-code-grant)
 
 ## Success Criteria
 ✅ Story is complete when:
-1. All test classes implemented
+1. All test classes implemented (including OAuth and Saxo-specific tests)
 2. All tests pass successfully
-3. 80%+ code coverage achieved
-4. Tests are well-documented
-5. Can run tests independently
-6. Coverage report generated
-7. No test failures or warnings
+3. Tests cover both OAuth and manual auth modes
+4. Tests validate structured watchlist format
+5. Tests validate Saxo-specific features (crypto format, asset-class sizing)
+6. 80%+ code coverage achieved
+7. Tests are well-documented
+8. Can run tests independently
+9. Coverage report generated
+10. No test failures or warnings

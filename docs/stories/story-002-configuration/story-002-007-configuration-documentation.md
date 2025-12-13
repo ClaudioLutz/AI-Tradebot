@@ -1,22 +1,25 @@
 # Story 002-007: Configuration Module Documentation
 
 ## Story Overview
-Create comprehensive documentation for the configuration module including API reference, usage examples, configuration guide, and troubleshooting tips.
+Create comprehensive documentation for the configuration module including OAuth-first authentication, structured instruments, API reference, usage examples, configuration guide, and troubleshooting tips for Saxo Bank.
 
 ## Parent Epic
 [Epic 002: Configuration Module Development](../../epics/epic-002-configuration-module.md)
 
 ## User Story
 **As a** developer  
-**I want to** have comprehensive documentation for the configuration module  
-**So that** I can easily understand and use the configuration system
+**I want to** have comprehensive documentation for the configuration module with Saxo-specific OAuth and structured instruments  
+**So that** I can easily understand OAuth authentication, instrument resolution, and multi-asset configuration
 
 ## Acceptance Criteria
 - [ ] README/guide for configuration module created
+- [ ] OAuth authentication documentation (recommended approach)
+- [ ] Structured instruments format documented
+- [ ] Manual token mode documentation (testing only)
 - [ ] API reference documentation complete
-- [ ] Usage examples provided
+- [ ] Usage examples provided (OAuth-first)
 - [ ] Configuration options documented
-- [ ] Troubleshooting guide included
+- [ ] Troubleshooting guide included (OAuth lifecycle, instrument resolution)
 - [ ] Environment variable reference complete
 - [ ] Best practices documented
 
@@ -44,12 +47,14 @@ Create `docs/CONFIG_MODULE_GUIDE.md`:
 
 ## Overview
 
-The configuration module (`config/config.py`) provides centralized management of all trading bot settings including:
+The configuration module (`config/config.py`) provides centralized management of all trading bot settings for Saxo Bank including:
 
-- **API Credentials:** Saxo Bank API connection details
-- **Watchlist:** Instruments to monitor and trade
+- **OAuth Authentication:** Long-running operation via refresh tokens (recommended)
+- **Manual Token Mode:** 24-hour tokens for quick testing
+- **Structured Watchlist:** Instruments with AssetType + UIC for reliable order placement
+- **Asset-Class-Specific Settings:** Different sizing for stocks vs FX/crypto
 - **Trading Settings:** Risk parameters, timeframes, and operational modes
-- **Validation:** Comprehensive configuration checks
+- **Validation:** Comprehensive Saxo-specific configuration checks
 
 ## Quick Start
 
@@ -58,13 +63,20 @@ The configuration module (`config/config.py`) provides centralized management of
 ```python
 from config.config import Config
 
-# Initialize configuration
+# Initialize configuration (auto-detects OAuth or manual mode)
 config = Config()
 
 # Access configuration
+print(f"Auth Mode: {config.auth_mode}")  # "oauth" or "manual"
 print(f"Environment: {config.environment}")
 print(f"Trading Mode: {config.get_trading_mode()}")
-print(f"Watchlist: {config.watchlist}")
+
+# Get access token (works for both modes, auto-refreshes in OAuth)
+token = config.get_access_token()
+
+# Access structured watchlist
+for inst in config.watchlist:
+    print(f"{inst['symbol']}: {inst['asset_type']}, UIC: {inst['uic']}")
 ```
 
 ### Using Convenience Function
@@ -78,71 +90,178 @@ config = get_config()
 
 ## Configuration Sections
 
-### 1. API Credentials
+### 1. Authentication
 
-Saxo Bank API authentication credentials.
+Saxo Bank API supports two authentication modes:
 
-**Required Environment Variables:**
-- `SAXO_REST_BASE` - Saxo OpenAPI base URL
-- `SAXO_ACCESS_TOKEN` - 24-hour access token
-- `SAXO_ENV` - Environment (SIM or LIVE)
+#### OAuth Mode (Recommended for Production)
+
+OAuth provides long-running operation through automatic token refresh:
+
+**Setup:**
+1. Create app in [Saxo Developer Portal](https://www.developer.saxo/openapi/appmanagement)
+2. Configure environment variables:
+   ```bash
+   SAXO_APP_KEY=your_app_key
+   SAXO_APP_SECRET=your_app_secret
+   SAXO_REDIRECT_URI=http://localhost:8080/callback
+   ```
+3. Authenticate once:
+   ```bash
+   python scripts/saxo_login.py
+   ```
+4. Tokens stored in `.secrets/saxo_tokens.json` (auto-refreshed)
+
+**Token Lifecycle:**
+- Access tokens: ~20 minutes (auto-refreshed)
+- Refresh tokens: Days/weeks
+- Bot runs continuously without manual intervention
 
 **Example:**
 ```python
-config = Config()
-print(f"Base URL: {config.base_url}")
-print(f"Token (masked): {config.get_masked_token()}")
-print(f"Is Simulation: {config.is_simulation()}")
+config = Config()  # Auto-detects OAuth mode
+print(f"Auth mode: {config.auth_mode}")  # "oauth"
+
+# Get token (auto-refreshes if needed)
+token = config.get_access_token()
 ```
 
-### 2. Watchlist
+#### Manual Token Mode (Testing Only)
 
-List of instruments to monitor and trade.
+Manual mode uses 24-hour tokens for quick testing:
 
-**Configuration:**
+**Setup:**
+1. Get token from [Saxo Token Generator](https://www.developer.saxo/openapi/token)
+2. Set environment variable:
+   ```bash
+   SAXO_ACCESS_TOKEN=your_24hour_token
+   ```
+
+⚠️ **Limitations:**
+- Expires after 24 hours
+- Requires manual renewal
+- Not suitable for long-running bots
+
+**Example:**
 ```python
-# Use default watchlist
-config = Config()
-
-# Or set via environment
-# WATCHLIST=AAPL,MSFT,GOOGL,TSLA,BTC/USD,ETH/USD
-
-# Access watchlist
-all_symbols = config.watchlist
-stocks = config.get_stock_symbols()
-crypto = config.get_crypto_symbols()
-
-# Dynamic management
-config.add_symbol("NVDA")
-config.remove_symbol("WMT")
+config = Config()  # Auto-detects manual mode
+print(f"Auth mode: {config.auth_mode}")  # "manual"
 ```
 
-### 3. Trading Settings
+**Environment Variables:**
+- `SAXO_REST_BASE` - Saxo OpenAPI base URL
+- `SAXO_ENV` - Environment (SIM or LIVE, default: SIM)
 
-Operational parameters and risk management.
+**For OAuth:**
+- `SAXO_APP_KEY`
+- `SAXO_APP_SECRET`
+- `SAXO_REDIRECT_URI`
+
+**For Manual:**
+- `SAXO_ACCESS_TOKEN`
+
+### 2. Structured Watchlist
+
+Saxo requires **AssetType + UIC** for order placement. The config module uses a structured format:
+
+**Structured Format:**
+```python
+watchlist = [
+    {
+        "symbol": "AAPL",          # Human-readable symbol
+        "asset_type": "Stock",     # Required: Stock, Etf, FxSpot, FxCrypto
+        "uic": 211,                # Required: Universal Instrument Code
+        "exchange": "NASDAQ"       # Optional: Exchange metadata
+    },
+    {
+        "symbol": "BTCUSD",        # Crypto (NO SLASH!)
+        "asset_type": "FxSpot",    # Currently FxSpot, transitioning to FxCrypto
+        "uic": 24680               # Resolved from Saxo API
+    }
+]
+```
+
+**Instrument Resolution:**
+Convert human-readable symbols to Saxo UICs:
+
+```python
+config = Config()
+
+# Watchlist loaded with UICs = None
+print(config.watchlist[0])
+# {"symbol": "AAPL", "asset_type": "Stock", "uic": None}
+
+# Resolve via Saxo API
+config.resolve_instruments()
+
+# Now has UIC
+print(config.watchlist[0])
+# {"symbol": "AAPL", "asset_type": "Stock", "uic": 211, "description": "Apple Inc.", "exchange": "NASDAQ"}
+```
+
+**CryptoFX Format:**
+⚠️ **Critical:** Saxo uses **no slash** for crypto symbols:
+
+- ✅ Correct: `"BTCUSD"`, `"ETHUSD"`, `"LTCUSD"`
+- ❌ Wrong: `"BTC/USD"`, `"ETH/USD"`
+
+Currently traded as `AssetType: FxSpot`. Saxo is planning migration to `FxCrypto`.
+
+**Configuration accepts both** for forward compatibility:
+```python
+{"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}     # Current
+{"symbol": "BTCUSD", "asset_type": "FxCrypto", "uic": 24680}  # Future
+```
+
+### 3. Trading Settings (Asset-Class-Specific)
+
+Operational parameters with Saxo multi-asset support.
 
 **Key Settings:**
 - `default_timeframe` - Market data timeframe (1Min, 5Min, etc.)
 - `dry_run` - Simulation mode flag
-- `max_position_size` - Maximum position size ($)
+- `max_position_value_usd` - Max position for Stock/ETF (converted to shares)
+- `max_fx_notional` - Max notional for FX/CryptoFX
+- `trading_hours_mode` - Trading hours strategy (fixed/always/instrument)
 - `stop_loss_pct` - Stop-loss percentage
 - `take_profit_pct` - Take-profit percentage
 
-**Example:**
+**Asset-Class-Specific Position Sizing:**
 ```python
 config = Config()
 
-# Check trading mode
-if config.is_dry_run():
-    print("Running in simulation mode")
+# Stock order (USD value → shares)
+stock_inst = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
+price = 175.0
+value_usd = config.get_position_size_for_asset(stock_inst, price, risk_pct=1.0)
+shares = config.calculate_shares_for_stock(price, risk_pct=1.0)
+print(f"Buy {shares} shares of AAPL (${value_usd:.2f})")
 
-# Calculate position size
-price = 150.0
-size = config.calculate_position_size(price, risk_pct=1.0)
+# FX/Crypto order (notional amount)
+crypto_inst = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+price = 43000.0
+notional = config.get_position_size_for_asset(crypto_inst, price, risk_pct=1.0)
+btc_units = notional / price
+print(f"Buy {btc_units:.6f} BTC (notional: ${notional:.2f})")
+```
 
-# Check trading hours
-if config.is_within_trading_hours():
-    print("Market is open")
+**Trading Hours Modes:**
+```python
+config = Config()
+
+# Mode: fixed (use configured hours, e.g., US market 14:00-21:00 UTC)
+# Mode: always (24/7 for crypto-only bots)
+# Mode: instrument (per-asset: stocks use fixed, crypto 24/5)
+
+stock = {"symbol": "AAPL", "asset_type": "Stock", "uic": 211}
+crypto = {"symbol": "BTCUSD", "asset_type": "FxSpot", "uic": 24680}
+
+# Check trading allowed
+if config.is_trading_allowed(stock):
+    print("Can trade stocks now")
+
+if config.is_trading_allowed(crypto):
+    print("Can trade crypto now")
 ```
 
 ## Environment Variables Reference
@@ -159,11 +278,13 @@ if config.is_within_trading_hours():
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SAXO_ENV` | `SIM` | Environment (SIM or LIVE) |
-| `WATCHLIST` | *(defaults)* | Comma-separated symbols |
+| `WATCHLIST` | *(structured)* | JSON array of instruments |
 | `DEFAULT_TIMEFRAME` | `1Min` | Market data timeframe |
 | `DRY_RUN` | `True` | Enable simulation mode |
-| `MAX_POSITION_SIZE` | `1000.0` | Max position size ($) |
+| `MAX_POSITION_VALUE_USD` | `1000.0` | Max position for Stock/ETF ($) |
+| `MAX_FX_NOTIONAL` | `10000.0` | Max notional for FX/Crypto |
 | `MAX_PORTFOLIO_EXPOSURE` | `10000.0` | Max total exposure ($) |
+| `TRADING_HOURS_MODE` | `fixed` | Trading hours mode (fixed/always/instrument) |
 | `STOP_LOSS_PCT` | `2.0` | Stop-loss percentage |
 | `TAKE_PROFIT_PCT` | `5.0` | Take-profit percentage |
 | `MIN_TRADE_AMOUNT` | `100.0` | Minimum trade amount ($) |
@@ -432,20 +553,42 @@ pip install python-dotenv
 **Symptom:** 401 authentication errors when using config
 
 **Solution:**
-Saxo Bank tokens expire after 24 hours. Generate new token:
-1. Login to Saxo Developer Portal
-2. Navigate to Applications
-3. Generate new 24h token
-4. Update `SAXO_ACCESS_TOKEN` in `.env`
+
+**If using OAuth mode (recommended):**
+- Tokens auto-refresh automatically
+- If refresh fails, re-authenticate:
+  ```bash
+  python scripts/saxo_login.py
+  ```
+
+**If using manual mode:**
+- Tokens expire after 24 hours
+- Generate new token from [Saxo Developer Portal](https://www.developer.saxo/openapi/token)
+- Update `SAXO_ACCESS_TOKEN` in `.env`
+- **Recommendation:** Switch to OAuth mode for production
 
 ### Issue: Invalid watchlist symbols
 
 **Symptom:** Symbols not found or trading errors
 
 **Solution:**
-- Ensure crypto uses slash format: `BTC/USD` not `BTCUSD`
+- ⚠️ **Crypto must use NO-SLASH format:** `BTCUSD` not `BTC/USD` (Saxo-specific)
 - Verify symbols are available on Saxo platform
 - Check symbol spelling and case (uppercase)
+- Ensure instruments have UICs resolved: `config.resolve_instruments()`
+
+### Issue: Unresolved instruments
+
+**Symptom:** `ConfigurationError: Unresolved instruments found`
+
+**Solution:**
+Instruments need UICs for trading:
+```python
+config = Config()
+config.resolve_instruments()  # Queries Saxo API for UICs
+```
+
+Or manually specify UICs in watchlist configuration.
 
 ### Issue: Configuration validation warnings
 
@@ -472,16 +615,22 @@ TAKE_PROFIT_PCT=5.0  # 2.5:1 risk/reward ratio
 
 ### 1. Always Use Environment Variables
 
-❌ **Don't hardcode credentials:**
+❌ **Don't hardcode credentials or bypass token provider:**
 ```python
 # BAD
 config.access_token = "my_token_here"
+config.manual_access_token = "hardcoded"
 ```
 
-✅ **Use environment variables:**
+✅ **Use OAuth mode with environment variables:**
 ```bash
-# .env file
-SAXO_ACCESS_TOKEN=your_token_here
+# .env file - OAuth (recommended)
+SAXO_APP_KEY=your_app_key
+SAXO_APP_SECRET=your_app_secret
+SAXO_REDIRECT_URI=http://localhost:8080/callback
+
+# Or manual mode for testing
+SAXO_ACCESS_TOKEN=your_24h_token
 ```
 
 ### 2. Validate Configuration on Startup
@@ -490,11 +639,22 @@ SAXO_ACCESS_TOKEN=your_token_here
 from config.config import Config
 
 config = Config()
+
+# Check auth mode
+print(f"Using {config.auth_mode} authentication")
+
+# Validate configuration
 if not config.is_valid():
     print("Configuration invalid - fix errors before proceeding")
     exit(1)
 
+# Review configuration
 config.print_configuration_summary()
+
+# Ensure instruments resolved
+if any(inst.get('uic') is None for inst in config.watchlist):
+    print("Resolving instruments...")
+    config.resolve_instruments()
 ```
 
 ### 3. Start with Dry-Run Mode
@@ -539,24 +699,46 @@ print(f"Max Position: ${settings['max_position_size']}")
 ## Security Considerations
 
 1. **Never commit `.env` file** - Add to `.gitignore`
-2. **Rotate tokens regularly** - Saxo tokens expire in 24h
-3. **Use SIM environment for development** - Avoid production risks
-4. **Mask sensitive data in logs** - Use `get_masked_token()`
-5. **Validate configuration** - Always check `is_valid()` before trading
+2. **Use OAuth for production** - Automatic token refresh, secure storage
+3. **Protect token file** - `.secrets/saxo_tokens.json` contains refresh token
+4. **Manual tokens expire in 24h** - Not suitable for long-running bots
+5. **Use SIM environment for development** - Avoid production risks
+6. **Mask sensitive data in logs** - Use `get_masked_token()`
+7. **Validate configuration** - Always check `is_valid()` before trading
+8. **Never commit structured watchlist with real UICs to public repos** - May expose trading strategy
 
 ## Related Documentation
 
 - [Epic 002: Configuration Module](../../epics/epic-002-configuration-module.md)
+- [EPIC-002 Revision Summary](../EPIC-002-REVISION-SUMMARY.md)
+- [OAuth Setup Guide](../OAUTH_SETUP_GUIDE.md)
 - [Saxo Migration Guide](../SAXO_MIGRATION_GUIDE.md)
-- [Saxo OpenAPI Documentation](https://developer.saxobank.com)
+- [Saxo OAuth Documentation](https://developer.saxobank.com/openapi/learn/oauth-authorization-code-grant)
+- [Saxo Order Placement Guide](https://www.developer.saxo/openapi/learn/order-placement)
+- [Saxo CryptoFX in OpenAPI](https://www.developer.saxo/openapi/learn/crypto-fx-in-openapi)
 
 ## Support
 
 For issues or questions about configuration:
 1. Check this documentation
 2. Review `.env.example` for reference
-3. Run configuration health check
-4. Check Saxo Developer Portal for API status
+3. Run configuration health check: `config.print_configuration_summary()`
+4. For OAuth issues, see `docs/OAUTH_SETUP_GUIDE.md`
+5. For instrument resolution, run `config.resolve_instruments()`
+6. Check Saxo Developer Portal for API status
+
+## Migration from Alpaca/Other Platforms
+
+If migrating from other platforms:
+
+**Key Differences:**
+1. **Auth:** OAuth refresh tokens (not static API keys)
+2. **Watchlist:** Structured format with AssetType + UIC
+3. **Crypto symbols:** No slashes (BTCUSD not BTC/USD)
+4. **Position sizing:** Asset-class-specific (stocks vs FX)
+5. **Trading hours:** Multiple modes (fixed/always/instrument)
+
+See `docs/SAXO_MIGRATION_GUIDE.md` for detailed migration steps.
 ```
 
 ## Files to Create
@@ -576,7 +758,7 @@ For issues or questions about configuration:
 - [ ] README updated with link
 
 ## Story Points
-**Estimate:** 2 points
+**Estimate:** 3 points (OAuth and structured instruments complexity)
 
 ## Dependencies
 - Story 002-001 through 002-006 completed
@@ -631,10 +813,16 @@ For issues or questions about configuration:
 ## Success Criteria
 ✅ Story is complete when:
 1. CONFIG_MODULE_GUIDE.md created
-2. API reference complete
-3. All usage examples work
-4. Troubleshooting guide helpful
-5. Environment variables documented
-6. Best practices clear
-7. README updated
-8. Documentation reviewed
+2. OAuth authentication documented as recommended approach
+3. Structured instruments format explained with examples
+4. Manual token mode documented with limitations
+5. Token lifecycle explained (refresh behavior)
+6. CryptoFX format (no slashes) clearly documented
+7. Asset-class-specific sizing examples provided
+8. API reference complete
+9. All usage examples work
+10. Troubleshooting guide covers OAuth and instrument resolution
+11. Environment variables documented
+12. Best practices clear
+13. README updated
+14. Documentation reviewed

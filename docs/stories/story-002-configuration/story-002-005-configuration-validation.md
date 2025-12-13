@@ -1,19 +1,20 @@
 # Story 002-005: Configuration Validation and Error Handling
 
 ## Story Overview
-Implement comprehensive validation logic for the complete configuration module, ensuring all settings are valid, consistent, and safe before the bot starts trading.
+Implement comprehensive validation logic for the complete configuration module, ensuring all settings are valid, consistent, safe, and compliant with Saxo Bank requirements before the bot starts trading.
 
 ## Parent Epic
 [Epic 002: Configuration Module Development](../../epics/epic-002-configuration-module.md)
 
 ## User Story
 **As a** developer  
-**I want to** validate the entire configuration on startup  
-**So that** I can catch configuration errors before the bot starts trading
+**I want to** validate the entire configuration with Saxo-specific checks on startup  
+**So that** I catch configuration errors before the bot starts trading and ensure proper OAuth and instrument resolution
 
 ## Acceptance Criteria
 - [ ] Comprehensive `is_valid()` method implemented
 - [ ] All configuration sections validated
+- [ ] Saxo-specific validations (OAuth, instrument resolution, crypto format)
 - [ ] Clear error messages for each validation failure
 - [ ] Configuration health check method available
 - [ ] Validation runs automatically on initialization
@@ -23,20 +24,25 @@ Implement comprehensive validation logic for the complete configuration module, 
 
 ### Prerequisites
 - Story 002-001 completed (module structure)
-- Story 002-002 completed (credentials)
-- Story 002-003 completed (watchlist)
+- Story 002-002 completed (credentials with OAuth)
+- Story 002-003 completed (structured watchlist)
 - Story 002-004 completed (trading settings)
 
 ### Validation Checks
 
-1. **API Credentials Validation**
+1. **API Credentials Validation (Saxo-Specific)**
    - Base URL format and accessibility
-   - Access token presence and format
+   - Auth mode consistency (OAuth vs manual token)
+   - OAuth: app credentials + token file existence
+   - Manual: access token presence
    - Environment consistency
 
-2. **Watchlist Validation**
-   - At least one symbol present
-   - Valid symbol formats
+2. **Watchlist Validation (Saxo-Specific)**
+   - At least one instrument present
+   - Structured format: {symbol, asset_type, uic}
+   - Instrument resolution (UIC presence for trading)
+   - Crypto format validation (no slashes: BTCUSD not BTC/USD)
+   - Crypto asset type compatibility (FxSpot vs FxCrypto)
    - No duplicate symbols
 
 3. **Trading Settings Validation**
@@ -44,6 +50,7 @@ Implement comprehensive validation logic for the complete configuration module, 
    - Valid timeframes
    - Logical trading hours
    - Positive amounts
+   - Asset-class-specific sizing parameters
 
 4. **Cross-Setting Validation**
    - Min trade amount <= Max position size
@@ -72,22 +79,27 @@ def _validate_complete_configuration(self):
     """
     Perform comprehensive validation of entire configuration.
     
+    Includes Saxo-specific validations for auth, instruments, and asset types.
+    
     Raises:
         ConfigurationError: If any validation check fails
     """
-    # All individual validations are already called in their loaders
-    # This method performs additional cross-validation
+    # Saxo-specific validations
+    self._validate_auth_mode()
+    self._validate_instrument_resolution()
+    self._validate_crypto_asset_types()
+    self._validate_crypto_symbol_format()
     
-    # Validate position sizing logic
-    if self.min_trade_amount > self.max_position_size:
+    # Cross-validation for position sizing logic
+    if self.min_trade_amount > self.max_position_value_usd:
         raise ConfigurationError(
             f"min_trade_amount (${self.min_trade_amount}) cannot exceed "
-            f"max_position_size (${self.max_position_size})"
+            f"max_position_value_usd (${self.max_position_value_usd})"
         )
     
-    if self.max_position_size > self.max_portfolio_exposure:
+    if self.max_position_value_usd > self.max_portfolio_exposure:
         raise ConfigurationError(
-            f"max_position_size (${self.max_position_size}) cannot exceed "
+            f"max_position_value_usd (${self.max_position_value_usd}) cannot exceed "
             f"max_portfolio_exposure (${self.max_portfolio_exposure})"
         )
     
@@ -112,6 +124,132 @@ def _validate_complete_configuration(self):
             "Ensure this is intentional.",
             UserWarning
         )
+    
+    # Warn if production with manual token mode
+    if self.is_production() and self.auth_mode == "manual":
+        import warnings
+        warnings.warn(
+            "⚠️  Using manual token mode in LIVE environment!\n"
+            "   Manual tokens expire after 24 hours.\n"
+            "   Consider switching to OAuth mode for production.",
+            UserWarning
+        )
+
+def _validate_auth_mode(self):
+    """
+    Validate that authentication mode is properly configured.
+    
+    Ensures either:
+    - OAuth mode: app credentials + token file exists
+    - Manual mode: access token present
+    
+    Raises:
+        ConfigurationError: If auth configuration is invalid
+    """
+    if self.auth_mode == "oauth":
+        # OAuth mode validation
+        if not self.app_key or not self.app_secret:
+            raise ConfigurationError(
+                "OAuth mode detected but app credentials incomplete. "
+                "Required: SAXO_APP_KEY, SAXO_APP_SECRET, SAXO_REDIRECT_URI"
+            )
+        
+        if not os.path.exists(self.token_file):
+            raise ConfigurationError(
+                f"OAuth mode configured but token file not found: {self.token_file}\n"
+                f"Please authenticate first:\n"
+                f"  python scripts/saxo_login.py"
+            )
+        
+        print(f"✓ OAuth authentication mode validated")
+    
+    elif self.auth_mode == "manual":
+        # Manual token mode validation
+        if not self.manual_access_token:
+            raise ConfigurationError(
+                "Manual token mode detected but SAXO_ACCESS_TOKEN not set."
+            )
+        
+        print(f"⚠️  Manual token mode (24-hour limitation)")
+        print(f"   For production use, switch to OAuth mode")
+    
+    else:
+        raise ConfigurationError(f"Unknown auth mode: {self.auth_mode}")
+
+def _validate_instrument_resolution(self):
+    """
+    Validate that all watchlist instruments can be resolved to {AssetType, Uic}.
+    
+    This is critical for Saxo order placement which requires both.
+    
+    Raises:
+        ConfigurationError: If instruments lack UICs
+    """
+    unresolved = [
+        inst for inst in self.watchlist 
+        if inst.get("uic") is None
+    ]
+    
+    if unresolved:
+        symbols = [inst.get("symbol") for inst in unresolved]
+        raise ConfigurationError(
+            f"Unresolved instruments found: {', '.join(symbols)}\n"
+            f"Run config.resolve_instruments() to query Saxo API for UICs.\n"
+            f"Or manually specify UICs in watchlist configuration."
+        )
+    
+    print(f"✓ All {len(self.watchlist)} instruments resolved with UICs")
+
+def _validate_crypto_asset_types(self):
+    """
+    Validate CryptoFX asset types (FxSpot vs FxCrypto).
+    
+    Saxo is transitioning from FxSpot to FxCrypto for crypto instruments.
+    Accept both during transition period.
+    
+    Raises:
+        ConfigurationError: If crypto has invalid asset type
+    """
+    crypto_instruments = [
+        inst for inst in self.watchlist
+        if inst.get("symbol", "").upper().startswith(("BTC", "ETH", "LTC", "XRP", "ADA"))
+    ]
+    
+    for inst in crypto_instruments:
+        asset_type = inst.get("asset_type")
+        
+        # Accept both FxSpot and FxCrypto for crypto
+        if asset_type not in ["FxSpot", "FxCrypto"]:
+            symbol = inst.get("symbol")
+            raise ConfigurationError(
+                f"Crypto instrument {symbol} has invalid asset type: {asset_type}\n"
+                f"Expected 'FxSpot' or 'FxCrypto'. "
+                f"Note: Saxo is transitioning crypto from FxSpot to FxCrypto."
+            )
+    
+    if crypto_instruments:
+        print(f"✓ CryptoFX validation passed for {len(crypto_instruments)} instruments")
+
+def _validate_crypto_symbol_format(self):
+    """
+    Validate that crypto symbols use Saxo format (no slashes).
+    
+    Saxo requires: BTCUSD, ETHUSD (not BTC/USD, ETH/USD)
+    
+    Raises:
+        ConfigurationError: If crypto symbols contain slashes
+    """
+    crypto_with_slashes = [
+        inst.get("symbol") for inst in self.watchlist
+        if inst.get("asset_type") in ["FxSpot", "FxCrypto"] and "/" in inst.get("symbol", "")
+    ]
+    
+    if crypto_with_slashes:
+        raise ConfigurationError(
+            f"Crypto symbols contain slashes (invalid for Saxo): {', '.join(crypto_with_slashes)}\n"
+            f"Saxo CryptoFX format: BTCUSD, ETHUSD (no slashes)\n"
+            f"Please update watchlist to remove slashes."
+        )
 
 def validate_symbol(self, symbol: str) -> bool:
     """
@@ -126,8 +264,9 @@ def validate_symbol(self, symbol: str) -> bool:
     if not symbol or not isinstance(symbol, str):
         return False
     
-    # Must contain only alphanumeric, /, -, .
-    if not all(c.isalnum() or c in ['/', '-', '.'] for c in symbol):
+    # Must contain only alphanumeric, -, .
+    # Note: Slashes are NOT allowed for Saxo crypto
+    if not all(c.isalnum() or c in ['-', '.'] for c in symbol):
         return False
     
     # Length check (reasonable bounds)
@@ -151,9 +290,10 @@ def get_configuration_health(self) -> Dict[str, Any]:
     # Check API credentials
     try:
         health["sections"]["api_credentials"] = {
-            "valid": bool(self.base_url and self.access_token),
+            "valid": bool(self.base_url and self.get_access_token()),
             "base_url_set": bool(self.base_url),
-            "token_set": bool(self.access_token),
+            "auth_mode": self.auth_mode,
+            "token_set": bool(self.get_access_token()),
             "environment": self.environment,
         }
     except Exception as e:
@@ -164,11 +304,13 @@ def get_configuration_health(self) -> Dict[str, Any]:
     
     # Check watchlist
     try:
+        unresolved = sum(1 for inst in self.watchlist if inst.get("uic") is None)
         health["sections"]["watchlist"] = {
-            "valid": len(self.watchlist) > 0,
-            "symbol_count": len(self.watchlist),
-            "stock_count": len(self.get_stock_symbols()),
-            "crypto_count": len(self.get_crypto_symbols()),
+            "valid": len(self.watchlist) > 0 and unresolved == 0,
+            "instrument_count": len(self.watchlist),
+            "resolved_count": len(self.watchlist) - unresolved,
+            "unresolved_count": unresolved,
+            "has_crypto": any(inst.get("asset_type") in ["FxSpot", "FxCrypto"] for inst in self.watchlist),
         }
     except Exception as e:
         health["sections"]["watchlist"] = {
@@ -183,6 +325,7 @@ def get_configuration_health(self) -> Dict[str, Any]:
             "trading_mode": self.get_trading_mode(),
             "dry_run": self.dry_run,
             "timeframe": self.default_timeframe,
+            "trading_hours_mode": self.trading_hours_mode,
             "risk_reward_ratio": round(self.take_profit_pct / self.stop_loss_pct, 2) if self.stop_loss_pct > 0 else 0,
         }
     except Exception as e:
@@ -204,6 +347,7 @@ def print_configuration_summary(self):
     # API Configuration
     print("\n📡 API Configuration:")
     print(f"  Environment:   {self.environment}")
+    print(f"  Auth Mode:     {self.auth_mode}")
     print(f"  Base URL:      {self.base_url}")
     print(f"  Token:         {self.get_masked_token()}")
     print(f"  Simulation:    {self.is_simulation()}")
@@ -211,11 +355,20 @@ def print_configuration_summary(self):
     # Watchlist
     print("\n📊 Watchlist:")
     watchlist_summary = self.get_watchlist_summary()
-    print(f"  Total Symbols: {watchlist_summary['total_symbols']}")
-    print(f"  Stocks:        {watchlist_summary['stock_count']} - {', '.join(watchlist_summary['stocks'][:5])}")
-    if watchlist_summary['stock_count'] > 5:
-        print(f"                 ... and {watchlist_summary['stock_count'] - 5} more")
-    print(f"  Crypto:        {watchlist_summary['crypto_count']} - {', '.join(watchlist_summary['crypto'])}")
+    print(f"  Total Instruments: {watchlist_summary['total_instruments']}")
+    
+    # Group by asset type
+    asset_types = {}
+    for inst in self.watchlist:
+        asset_type = inst.get("asset_type", "Unknown")
+        if asset_type not in asset_types:
+            asset_types[asset_type] = []
+        asset_types[asset_type].append(inst.get("symbol"))
+    
+    for asset_type, symbols in asset_types.items():
+        print(f"  {asset_type}: {len(symbols)} - {', '.join(symbols[:5])}")
+        if len(symbols) > 5:
+            print(f"    ... and {len(symbols) - 5} more")
     
     # Trading Settings
     print("\n⚙️  Trading Settings:")
@@ -223,10 +376,12 @@ def print_configuration_summary(self):
     print(f"  Mode:          {settings['trading_mode']}")
     print(f"  Timeframe:     {settings['default_timeframe']}")
     print(f"  Dry Run:       {settings['dry_run']}")
+    print(f"  Hours Mode:    {settings['trading_hours_mode']}")
     
     # Risk Management
     print("\n💰 Risk Management:")
-    print(f"  Max Position:  ${settings['max_position_size']}")
+    print(f"  Stock Position:${settings['max_position_value_usd']}")
+    print(f"  FX Notional:   ${settings['max_fx_notional']}")
     print(f"  Max Exposure:  ${settings['max_portfolio_exposure']}")
     print(f"  Stop Loss:     {settings['stop_loss_pct']}%")
     print(f"  Take Profit:   {settings['take_profit_pct']}%")
@@ -268,14 +423,14 @@ def export_configuration(self, include_sensitive: bool = False) -> Dict[str, Any
     config_dict = {
         "api": {
             "base_url": self.base_url,
+            "auth_mode": self.auth_mode,
             "environment": self.environment,
-            "token": self.access_token if include_sensitive else self.get_masked_token(),
+            "token": self.get_access_token() if include_sensitive else self.get_masked_token(),
             "is_simulation": self.is_simulation(),
         },
         "watchlist": {
-            "symbols": self.watchlist,
-            "stocks": self.get_stock_symbols(),
-            "crypto": self.get_crypto_symbols(),
+            "instruments": self.watchlist,
+            "count": len(self.watchlist),
         },
         "trading_settings": {
             "timeframe": self.default_timeframe,
@@ -283,9 +438,11 @@ def export_configuration(self, include_sensitive: bool = False) -> Dict[str, Any
             "trading_mode": self.get_trading_mode(),
             "dry_run": self.dry_run,
             "backtest_mode": self.backtest_mode,
+            "trading_hours_mode": self.trading_hours_mode,
         },
         "risk_management": {
-            "max_position_size": self.max_position_size,
+            "max_position_value_usd": self.max_position_value_usd,
+            "max_fx_notional": self.max_fx_notional,
             "max_portfolio_exposure": self.max_portfolio_exposure,
             "stop_loss_pct": self.stop_loss_pct,
             "take_profit_pct": self.take_profit_pct,
@@ -325,10 +482,11 @@ def save_configuration_to_file(self, filepath: str, include_sensitive: bool = Fa
 ```
 
 ## Files to Modify
-- `config/config.py` - Add validation and health check methods
+- `config/config.py` - Add Saxo-specific validation and health check methods
 
 ## Definition of Done
 - [ ] Comprehensive validation implemented
+- [ ] Saxo-specific validations added (OAuth, instruments, crypto)
 - [ ] Health check method working
 - [ ] Configuration summary printing
 - [ ] Export functionality implemented
@@ -348,7 +506,55 @@ print(f"Configuration valid: {config.is_valid()}")
 
 Expected: "Configuration valid: True"
 
-### Test 2: Configuration Health Check
+### Test 2: OAuth Mode Validation
+```python
+from config.config import Config
+
+config = Config()  # Should auto-detect OAuth if configured
+print(f"Auth mode: {config.auth_mode}")
+print(f"Token file exists: {os.path.exists(config.token_file)}")
+```
+
+Expected:
+```
+Auth mode: oauth
+Token file exists: True
+✓ OAuth authentication mode validated
+```
+
+### Test 3: Instrument Resolution Validation
+```python
+from config.config import Config
+
+config = Config()
+# If instruments unresolved, should raise error
+try:
+    config._validate_instrument_resolution()
+except ConfigurationError as e:
+    print(f"Expected error: {e}")
+```
+
+Expected (if unresolved): "Expected error: Unresolved instruments found: AAPL, MSFT..."
+
+### Test 4: Crypto Format Validation
+```python
+from config.config import Config
+
+# Test with invalid crypto format (slash)
+config = Config()
+config.watchlist = [
+    {"symbol": "BTC/USD", "asset_type": "FxSpot", "uic": 24680}
+]
+
+try:
+    config._validate_crypto_symbol_format()
+except ConfigurationError as e:
+    print(f"Expected error: {e}")
+```
+
+Expected: "Expected error: Crypto symbols contain slashes..."
+
+### Test 5: Configuration Health Check
 ```python
 from config.config import Config
 
@@ -356,18 +562,20 @@ config = Config()
 health = config.get_configuration_health()
 
 print(f"Overall valid: {health['overall_valid']}")
-print(f"Sections: {list(health['sections'].keys())}")
-print(f"Watchlist valid: {health['sections']['watchlist']['valid']}")
+print(f"Auth mode: {health['sections']['api_credentials']['auth_mode']}")
+print(f"Instruments: {health['sections']['watchlist']['instrument_count']}")
+print(f"Resolved: {health['sections']['watchlist']['resolved_count']}")
 ```
 
 Expected:
 ```
 Overall valid: True
-Sections: ['api_credentials', 'watchlist', 'trading_settings']
-Watchlist valid: True
+Auth mode: oauth
+Instruments: 5
+Resolved: 5
 ```
 
-### Test 3: Print Configuration Summary
+### Test 6: Print Configuration Summary
 ```python
 from config.config import Config
 
@@ -375,105 +583,82 @@ config = Config()
 config.print_configuration_summary()
 ```
 
-Expected: Formatted configuration summary output
+Expected: Formatted configuration summary with all sections
 
-### Test 4: Invalid Position Size
-```python
-import os
-os.environ['MIN_TRADE_AMOUNT'] = '2000.0'
-os.environ['MAX_POSITION_SIZE'] = '1000.0'
-
-from config.config import Config, ConfigurationError
-try:
-    config = Config()
-except ConfigurationError as e:
-    print(f"Expected error: {e}")
-```
-
-Expected: "Expected error: min_trade_amount ($2000.0) cannot exceed max_position_size..."
-
-### Test 5: Export Configuration
-```python
-from config.config import Config
-
-config = Config()
-config_dict = config.export_configuration(include_sensitive=False)
-
-print(f"Keys: {list(config_dict.keys())}")
-print(f"Has API: {'api' in config_dict}")
-print(f"Has Watchlist: {'watchlist' in config_dict}")
-print(f"Token masked: {'...' in config_dict['api']['token']}")
-```
-
-Expected:
-```
-Keys: ['api', 'watchlist', 'trading_settings', 'risk_management', 'trading_parameters', 'logging']
-Has API: True
-Has Watchlist: True
-Token masked: True
-```
-
-### Test 6: Symbol Validation
+### Test 7: Symbol Validation (No Slashes)
 ```python
 from config.config import Config
 
 config = Config()
 print(f"Valid 'AAPL': {config.validate_symbol('AAPL')}")
-print(f"Valid 'BTC/USD': {config.validate_symbol('BTC/USD')}")
-print(f"Valid 'ABC@123': {config.validate_symbol('ABC@123')}")  # Invalid
-print(f"Valid '': {config.validate_symbol('')}")  # Invalid
+print(f"Valid 'BTCUSD': {config.validate_symbol('BTCUSD')}")
+print(f"Valid 'BTC/USD': {config.validate_symbol('BTC/USD')}")  # Should be False
+print(f"Valid 'ABC@123': {config.validate_symbol('ABC@123')}")  # Should be False
 ```
 
 Expected:
 ```
 Valid 'AAPL': True
-Valid 'BTC/USD': True
+Valid 'BTCUSD': True
+Valid 'BTC/USD': False
 Valid 'ABC@123': False
-Valid '': False
 ```
 
 ## Story Points
-**Estimate:** 3 points
+**Estimate:** 5 points (Saxo-specific validations add complexity)
 
 ## Dependencies
 - Story 002-001 completed (module structure)
-- Story 002-002 completed (credentials)
-- Story 002-003 completed (watchlist)
+- Story 002-002 completed (credentials with OAuth)
+- Story 002-003 completed (structured watchlist)
 - Story 002-004 completed (trading settings)
 
 ## Blocks
 - Story 002-006 (testing needs validation)
 - Story 002-007 (documentation needs complete module)
 
-## Validation Best Practices
-1. **Fail Fast:** Catch errors during initialization
-2. **Clear Messages:** Help users fix problems
-3. **Cross-Validation:** Check relationships between settings
-4. **Health Checks:** Provide diagnostic information
-5. **Safe Defaults:** Prefer conservative settings
+## Saxo-Specific Validation Rationale
+
+### OAuth Mode Validation
+- **Ensures long-running capability**: OAuth with refresh tokens enables >24h operation
+- **Prevents production failures**: Catches missing token files before trading
+- **Clear guidance**: Error messages tell users how to authenticate
+
+### Instrument Resolution Validation
+- **Trading requirement**: Saxo orders require AssetType + UIC
+- **Prevents order failures**: Catches unresolved instruments before trading
+- **Resolution guidance**: Error message instructs how to resolve UICs
+
+### Crypto Format Validation
+- **Saxo-specific requirement**: CryptoFX uses BTCUSD not BTC/USD
+- **Prevents lookup failures**: Slash format won't match Saxo instruments
+- **Clear migration path**: Error message explains correct format
+
+### Crypto Asset Type Validation
+- **Transition support**: Accepts both FxSpot and FxCrypto during Saxo migration
+- **Future-proof**: Ready for Saxo's FxSpot → FxCrypto transition
+- **Explicit validation**: Rejects invalid asset types for crypto
 
 ## Common Validation Errors
 
-### Invalid Position Sizing
-- Min trade > Max position
-- Max position > Max exposure
+### Auth Mode Errors
+- **OAuth without token file**: Run `python scripts/saxo_login.py`
+- **Missing app credentials**: Set SAXO_APP_KEY, SAXO_APP_SECRET
+- **Manual without token**: Set SAXO_ACCESS_TOKEN
 
-### Invalid Risk Parameters
-- Stop-loss = 0
-- Negative percentages
-- Stop-loss > Take-profit (warning)
+### Instrument Resolution Errors
+- **Unresolved UICs**: Run `config.resolve_instruments()`
+- **Ambiguous matches**: Manually specify UIC
+- **Invalid symbols**: Check Saxo instrument availability
 
-### Invalid Watchlist
-- Empty watchlist
-- Invalid symbol format
-- Duplicate symbols
-
-### Invalid Trading Hours
-- Hours outside 0-23 range
-- Negative lookback days
+### Crypto Format Errors
+- **Slashes in symbols**: Remove slashes (BTC/USD → BTCUSD)
+- **Wrong asset type**: Use FxSpot or FxCrypto
+- **Invalid crypto pairs**: Check Saxo CryptoFX availability
 
 ## Architecture Notes
 - **Defensive Programming:** Validate early and often
+- **Saxo-Specific:** Checks aligned with Saxo requirements
 - **User-Friendly:** Clear error messages with solutions
 - **Debuggable:** Export and summary methods aid troubleshooting
 - **Secure:** Never log sensitive data by default
@@ -487,15 +672,18 @@ Valid '': False
 
 ## References
 - Parent Epic: `docs/epics/epic-002-configuration-module.md`
-- [Python Validation Best Practices](https://realpython.com/python-data-validation/)
+- EPIC-002 Revision Summary: `docs/EPIC-002-REVISION-SUMMARY.md`
+- [Saxo OAuth Documentation](https://developer.saxobank.com/openapi/learn/oauth-authorization-code-grant)
+- [Saxo Order Placement](https://www.developer.saxo/openapi/learn/order-placement)
 
 ## Success Criteria
 ✅ Story is complete when:
 1. Comprehensive validation implemented
-2. Health check functional
-3. Summary printing working
-4. Export functionality complete
-5. Cross-validation checks in place
-6. All verification tests pass
-7. Clear error messages for all failures
-8. Documentation complete
+2. Saxo-specific validations working (OAuth, instruments, crypto)
+3. Health check functional
+4. Summary printing working
+5. Export functionality complete
+6. Cross-validation checks in place
+7. All verification tests pass
+8. Clear error messages for all failures
+9. Documentation complete
