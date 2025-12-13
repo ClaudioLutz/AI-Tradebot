@@ -19,25 +19,29 @@ Build foundation indicator library with:
 ## Acceptance Criteria
 
 ### 1. Simple Moving Average Function
-- [ ] `simple_moving_average(values: List[float], window: int) -> Optional[float]` created
+- [ ] `simple_moving_average(values: Sequence[float], window: int) -> Optional[float]` created
 - [ ] Returns None if `len(values) < window`
 - [ ] Calculates mean of last `window` values
 - [ ] Raises ValueError if `window <= 0`
 - [ ] Pure function (no side effects)
+- [ ] Accepts `Sequence[float]` (more flexible than `List[float]`)
 
 ### 2. Exponential Moving Average Function (Optional)
-- [ ] `exponential_moving_average(values: List[float], window: int, smoothing: float = 2.0) -> Optional[float]`
+- [ ] `exponential_moving_average(values: Sequence[float], window: int, smoothing: float = 2.0) -> Optional[float]`
 - [ ] Returns None if `len(values) < window`
 - [ ] Uses standard EMA formula: `EMA = (Close - EMA_prev) * multiplier + EMA_prev`
 - [ ] Multiplier = `smoothing / (window + 1)`
 - [ ] Pure function (no side effects)
+- [ ] Accepts `Sequence[float]` (more flexible than `List[float]`)
 
 ### 3. Safe Bar Slicing Utility
-- [ ] `safe_slice_bars(bars: List[dict], n: int, require_closed: bool = True) -> Optional[List[dict]]`
-- [ ] If `require_closed=True`: only returns bars with explicit "closed" status or timestamp before "now"
+- [ ] `safe_slice_bars(bars: List[dict], n: int, require_closed: bool = True, as_of: Optional[datetime] = None) -> Optional[List[dict]]`
+- [ ] If `require_closed=True`: only returns bars with timestamp before `as_of` (or current time if as_of=None)
+- [ ] `as_of` parameter makes function deterministic for backtesting
 - [ ] Returns None if insufficient bars available
 - [ ] Validates bar structure (has required fields)
 - [ ] Returns last `n` bars if available
+- [ ] **CRITICAL:** Never uses `datetime.now()` internally when `as_of` is provided (prevents time leakage)
 
 ### 4. Crossover Detection Helper
 - [ ] `detect_crossover(current_short: float, current_long: float, prev_short: float, prev_long: float) -> str`
@@ -73,9 +77,9 @@ strategies/
 
 ### Simple Moving Average Implementation
 ```python
-from typing import List, Optional
+from typing import Sequence, Optional
 
-def simple_moving_average(values: List[float], window: int) -> Optional[float]:
+def simple_moving_average(values: Sequence[float], window: int) -> Optional[float]:
     """
     Calculate Simple Moving Average of last `window` values.
     
@@ -105,7 +109,7 @@ def simple_moving_average(values: List[float], window: int) -> Optional[float]:
 ### Exponential Moving Average Implementation
 ```python
 def exponential_moving_average(
-    values: List[float], 
+    values: Sequence[float], 
     window: int, 
     smoothing: float = 2.0
 ) -> Optional[float]:
@@ -156,17 +160,23 @@ from typing import List, Optional, Dict
 def safe_slice_bars(
     bars: List[Dict], 
     n: int, 
-    require_closed: bool = True
+    require_closed: bool = True,
+    as_of: Optional[datetime] = None
 ) -> Optional[List[Dict]]:
     """
     Safely extract last `n` bars, optionally enforcing "closed-bar only" rule.
     
     This function prevents look-ahead bias by ensuring only completed bars are used.
     
+    **CRITICAL FOR BACKTESTING:** The `as_of` parameter makes this function deterministic.
+    In live mode, pass current UTC time. In backtest mode, pass the bar-close timestamp
+    you are evaluating. Never call without `as_of` in backtest mode.
+    
     Args:
         bars: List of bar dicts with at least {"close": float, "timestamp": str}
         n: Number of bars to extract
-        require_closed: If True, only use bars with explicit closed status or past timestamp
+        require_closed: If True, only use bars with timestamp before `as_of`
+        as_of: Reference time for determining "closed" bars (defaults to now if None)
     
     Returns:
         Last `n` bars if available, or None if insufficient data
@@ -174,12 +184,19 @@ def safe_slice_bars(
     Raises:
         ValueError: If bars have invalid structure
     
-    Example:
+    Example (live mode):
+        >>> from datetime import datetime, timezone
+        >>> as_of = datetime.now(timezone.utc)
         >>> bars = [
-        ...     {"close": 100, "timestamp": "2025-01-01T10:00:00Z", "is_closed": True},
-        ...     {"close": 101, "timestamp": "2025-01-01T10:05:00Z", "is_closed": True},
+        ...     {"close": 100, "timestamp": "2025-01-01T10:00:00Z"},
+        ...     {"close": 101, "timestamp": "2025-01-01T10:05:00Z"},
         ... ]
-        >>> safe_slice_bars(bars, 2, require_closed=True)
+        >>> safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
+        [{"close": 100, ...}, {"close": 101, ...}]
+    
+    Example (backtest mode):
+        >>> as_of = datetime.fromisoformat("2025-01-01T10:10:00Z")
+        >>> safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
         [{"close": 100, ...}, {"close": 101, ...}]
     """
     if not bars or len(bars) < n:
@@ -193,7 +210,11 @@ def safe_slice_bars(
             raise ValueError(f"Bar missing 'timestamp' field: {bar}")
     
     if require_closed:
-        now = datetime.now(timezone.utc)
+        # Use as_of if provided, otherwise fall back to current time
+        # WARNING: Fallback to now() is for live mode convenience only
+        # In backtest mode, as_of MUST be provided
+        reference_time = as_of if as_of is not None else datetime.now(timezone.utc)
+        
         filtered_bars = []
         
         for bar in bars:
@@ -202,10 +223,10 @@ def safe_slice_bars(
                 filtered_bars.append(bar)
                 continue
             
-            # Check if bar timestamp is in the past
+            # Check if bar timestamp is before reference time
             try:
                 bar_time = datetime.fromisoformat(bar["timestamp"].replace('Z', '+00:00'))
-                if bar_time < now:
+                if bar_time < reference_time:
                     filtered_bars.append(bar)
             except (ValueError, KeyError):
                 # Skip bars with invalid timestamps when require_closed=True
@@ -266,8 +287,13 @@ def detect_crossover(
 3. **Composability:** Can be combined without side effects
 4. **Debugging:** No hidden state makes issues easier to trace
 
-### Why require_closed Flag?
-This enforces "closed-bar only" discipline to prevent look-ahead bias. In backtesting, using the current bar's high/low before it closes is a classic mistake that produces misleadingly good results.
+### Why require_closed Flag and as_of Parameter?
+The `require_closed` flag enforces "closed-bar only" discipline to prevent look-ahead bias. In backtesting, using the current bar's high/low before it closes is a classic mistake that produces misleadingly good results.
+
+The `as_of` parameter is **critical for deterministic backtesting**:
+- **Live mode:** Pass `datetime.now(timezone.utc)` to filter bars up to current time
+- **Backtest mode:** Pass the bar-close timestamp you're evaluating (e.g., "2025-01-15T10:30:00Z")
+- **Why it matters:** Without `as_of`, the function uses wall-clock time internally, which changes between calls and creates non-reproducible results in backtests ("time leakage")
 
 **Reference:** Evidence-Based Technical Analysis (Aronson) - Look-ahead bias prevention
 
@@ -317,12 +343,15 @@ def test_ema_calculation():
 
 def test_safe_slice_bars_sufficient():
     """Test bar slicing with sufficient data."""
+    from datetime import datetime, timezone
+    
+    as_of = datetime.fromisoformat("2025-01-01T10:15:00Z")
     bars = [
-        {"close": 100, "timestamp": "2025-01-01T10:00:00Z", "is_closed": True},
-        {"close": 101, "timestamp": "2025-01-01T10:05:00Z", "is_closed": True},
-        {"close": 102, "timestamp": "2025-01-01T10:10:00Z", "is_closed": True},
+        {"close": 100, "timestamp": "2025-01-01T10:00:00Z"},
+        {"close": 101, "timestamp": "2025-01-01T10:05:00Z"},
+        {"close": 102, "timestamp": "2025-01-01T10:10:00Z"},
     ]
-    result = safe_slice_bars(bars, 2, require_closed=True)
+    result = safe_slice_bars(bars, 2, require_closed=True, as_of=as_of)
     assert result is not None
     assert len(result) == 2
     assert result[0]["close"] == 101
@@ -332,6 +361,29 @@ def test_safe_slice_bars_insufficient():
     bars = [{"close": 100, "timestamp": "2025-01-01T10:00:00Z"}]
     result = safe_slice_bars(bars, 3, require_closed=False)
     assert result is None
+
+def test_safe_slice_bars_deterministic():
+    """Test that as_of parameter makes function deterministic."""
+    from datetime import datetime, timezone
+    
+    as_of = datetime.fromisoformat("2025-01-01T10:15:00Z")
+    bars = [
+        {"close": 100, "timestamp": "2025-01-01T10:00:00Z"},
+        {"close": 101, "timestamp": "2025-01-01T10:05:00Z"},
+        {"close": 102, "timestamp": "2025-01-01T10:10:00Z"},
+        {"close": 103, "timestamp": "2025-01-01T10:20:00Z"},  # After as_of, should be excluded
+    ]
+    
+    result1 = safe_slice_bars(bars, 3, require_closed=True, as_of=as_of)
+    result2 = safe_slice_bars(bars, 3, require_closed=True, as_of=as_of)
+    
+    # Should return same bars both times (deterministic)
+    assert result1 == result2
+    assert len(result1) == 3
+    assert result1[-1]["close"] == 102  # Last bar before as_of
+    
+    # Bar at 10:20 should be excluded since it's after as_of
+    assert all(bar["close"] != 103 for bar in result1)
 
 def test_detect_crossover_up():
     """Test bullish crossover detection."""

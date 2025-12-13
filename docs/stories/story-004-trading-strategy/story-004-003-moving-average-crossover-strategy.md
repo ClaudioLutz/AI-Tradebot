@@ -26,6 +26,7 @@ Create production-ready Moving Average Crossover strategy that:
   - `short_window: int = 5`
   - `long_window: int = 20`
   - `threshold_bps: Optional[int] = None` (noise filter in basis points)
+  - `cooldown_bars: Optional[int] = None` (minimum bars between trades to prevent churn)
 - [ ] Validates `short_window < long_window` at initialization
 
 ### 2. Crossover Detection Implemented
@@ -43,12 +44,24 @@ Create production-ready Moving Average Crossover strategy that:
   - "CROSSOVER_UP" - bullish crossover detected
   - "CROSSOVER_DOWN" - bearish crossover detected
   - "NO_CROSSOVER" - MA relationship stable
-- [ ] Timestamps generated at decision time
+  - "COOLDOWN_ACTIVE" - signal suppressed due to cooldown
+- [ ] Uses **bar-close timestamp** as `decision_time` (not wall-clock `now()`)
+- [ ] Uses wall-clock time as `timestamp` for system logging
+- [ ] Includes `price_ref` (last close price) and `price_type` ("close")
+- [ ] Includes `data_time_range` (first and last bar timestamps)
 - [ ] Metadata includes MA values for audit trail
 
 ### 4. Optional Threshold/Noise Filter
 - [ ] If `threshold_bps` provided, requires MA separation > threshold before signaling
 - [ ] Prevents whipsaw trades in ranging markets
+- [ ] Guards against division by zero when `current_long_ma == 0`
+- [ ] Documented in strategy comments
+
+### 4a. Optional Cooldown Period
+- [ ] If `cooldown_bars` provided, tracks last signal bar index per instrument
+- [ ] Suppresses new signals if fewer than `cooldown_bars` have passed since last signal
+- [ ] Prevents excessive trading in sideways/choppy markets
+- [ ] Useful for beginners to reduce trading frequency
 - [ ] Documented in strategy comments
 
 ### 5. Edge Case Handling
@@ -126,6 +139,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         short_window: int = 5,
         long_window: int = 20,
         threshold_bps: Optional[int] = None,
+        cooldown_bars: Optional[int] = None,
     ):
         """
         Initialize Moving Average Crossover strategy.
@@ -134,6 +148,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             short_window: Short MA period (default 5)
             long_window: Long MA period (default 20)
             threshold_bps: Minimum MA separation in bps to trigger signal (optional)
+            cooldown_bars: Minimum bars between trades to prevent churn (optional)
         
         Raises:
             ValueError: If short_window >= long_window or windows invalid
@@ -149,14 +164,21 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         if threshold_bps is not None and threshold_bps < 0:
             raise ValueError(f"threshold_bps must be non-negative, got {threshold_bps}")
         
+        if cooldown_bars is not None and cooldown_bars < 0:
+            raise ValueError(f"cooldown_bars must be non-negative, got {cooldown_bars}")
+        
         self.short_window = short_window
         self.long_window = long_window
         self.threshold_bps = threshold_bps
+        self.cooldown_bars = cooldown_bars
+        
+        # Track last signal bar index per instrument for cooldown
+        self._last_signal_bar_index: Dict[str, int] = {}
         
         logger.info(
             f"Initialized MovingAverageCrossoverStrategy: "
             f"short={short_window}, long={long_window}, "
-            f"threshold={threshold_bps}bps"
+            f"threshold={threshold_bps}bps, cooldown={cooldown_bars}bars"
         )
     
     def generate_signals(self, market_data: Dict[str, dict]) -> Dict[str, Signal]:
@@ -170,7 +192,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             Dict keyed by instrument_id with Signal objects
         """
         signals = {}
-        timestamp = get_current_timestamp()
+        wall_clock_timestamp = get_current_timestamp()
         
         for instrument_id, data in market_data.items():
             symbol = data.get("symbol", "UNKNOWN")
@@ -186,13 +208,16 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 signals[instrument_id] = Signal(
                     action="HOLD",
                     reason="INSUFFICIENT_BARS",
-                    timestamp=timestamp,
+                    timestamp=wall_clock_timestamp,
+                    decision_time=wall_clock_timestamp,
                     metadata={"required": required_bars, "available": len(bars) if bars else 0}
                 )
                 continue
             
             # Use safe_slice_bars to enforce closed-bar discipline
-            valid_bars = safe_slice_bars(bars, required_bars, require_closed=True)
+            # Extract as_of time from last bar for deterministic behavior
+            last_bar_time = datetime.fromisoformat(bars[-1]["timestamp"].replace('Z', '+00:00'))
+            valid_bars = safe_slice_bars(bars, required_bars, require_closed=True, as_of=last_bar_time)
             if valid_bars is None:
                 logger.warning(
                     f"{instrument_id} ({symbol}): No closed bars available"
@@ -200,9 +225,18 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 signals[instrument_id] = Signal(
                     action="HOLD",
                     reason="INSUFFICIENT_BARS",
-                    timestamp=timestamp,
+                    timestamp=wall_clock_timestamp,
+                    decision_time=wall_clock_timestamp,
                 )
                 continue
+            
+            # Extract decision time (last bar close) and data time range
+            decision_time = valid_bars[-1]["timestamp"]
+            data_time_range = {
+                "first_bar": valid_bars[0]["timestamp"],
+                "last_bar": valid_bars[-1]["timestamp"]
+            }
+            last_close_price = valid_bars[-1]["close"]
             
             # Extract closing prices
             closes = [bar["close"] for bar in valid_bars]
@@ -224,27 +258,53 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 signals[instrument_id] = Signal(
                     action="HOLD",
                     reason="INSUFFICIENT_BARS",
-                    timestamp=timestamp,
+                    timestamp=wall_clock_timestamp,
+                    decision_time=decision_time,
                 )
                 continue
             
-            # Detect crossover (previous vs current comparison)
-            crossover_type = detect_crossover(
-                current_short_ma, current_long_ma,
-                prev_short_ma, prev_long_ma
-            )
+            # Guard against division by zero in threshold calculation
+            if self.threshold_bps is not None and current_long_ma == 0:
+                logger.warning(
+                    f"{instrument_id} ({symbol}): current_long_ma is zero, cannot apply threshold"
+                )
+                # Treat as no crossover to avoid invalid calculation
+                crossover_type = "NO_CROSSOVER"
+            else:
             
-            # Apply optional threshold filter
-            if self.threshold_bps is not None and crossover_type != "NO_CROSSOVER":
-                separation_pct = abs(current_short_ma - current_long_ma) / current_long_ma
-                threshold_decimal = self.threshold_bps / 10000.0
+                # Detect crossover (previous vs current comparison)
+                crossover_type = detect_crossover(
+                    current_short_ma, current_long_ma,
+                    prev_short_ma, prev_long_ma
+                )
                 
-                if separation_pct < threshold_decimal:
+                # Apply optional threshold filter
+                if self.threshold_bps is not None and crossover_type != "NO_CROSSOVER":
+                    separation_pct = abs(current_short_ma - current_long_ma) / current_long_ma
+                    threshold_decimal = self.threshold_bps / 10000.0
+                    
+                    if separation_pct < threshold_decimal:
+                        logger.debug(
+                            f"{instrument_id} ({symbol}): Crossover detected but below "
+                            f"threshold ({separation_pct:.4%} < {threshold_decimal:.4%})"
+                        )
+                        crossover_type = "NO_CROSSOVER"
+            
+            # Apply optional cooldown filter
+            if self.cooldown_bars is not None and crossover_type != "NO_CROSSOVER":
+                current_bar_index = len(bars) - 1
+                last_signal_index = self._last_signal_bar_index.get(instrument_id, -999999)
+                bars_since_signal = current_bar_index - last_signal_index
+                
+                if bars_since_signal < self.cooldown_bars:
                     logger.debug(
-                        f"{instrument_id} ({symbol}): Crossover detected but below "
-                        f"threshold ({separation_pct:.4%} < {threshold_decimal:.4%})"
+                        f"{instrument_id} ({symbol}): Crossover detected but in cooldown "
+                        f"({bars_since_signal}/{self.cooldown_bars} bars since last signal)"
                     )
-                    crossover_type = "NO_CROSSOVER"
+                    crossover_type = "COOLDOWN_ACTIVE"
+                else:
+                    # Update last signal index
+                    self._last_signal_bar_index[instrument_id] = current_bar_index
             
             # Generate signal based on crossover
             if crossover_type == "CROSSOVER_UP":
@@ -261,6 +321,12 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                     f"{instrument_id} ({symbol}): Death cross detected - SELL "
                     f"(short_MA={current_short_ma:.2f}, long_MA={current_long_ma:.2f})"
                 )
+            elif crossover_type == "COOLDOWN_ACTIVE":
+                action = "HOLD"
+                reason = "COOLDOWN_ACTIVE"
+                logger.debug(
+                    f"{instrument_id} ({symbol}): Signal suppressed (cooldown active)"
+                )
             else:
                 action = "HOLD"
                 reason = "NO_CROSSOVER"
@@ -269,11 +335,15 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                     f"(short_MA={current_short_ma:.2f}, long_MA={current_long_ma:.2f})"
                 )
             
-            # Create signal with metadata
+            # Create signal with enhanced schema
             signals[instrument_id] = Signal(
                 action=action,
                 reason=reason,
-                timestamp=timestamp,
+                timestamp=wall_clock_timestamp,
+                decision_time=decision_time,
+                price_ref=last_close_price,
+                price_type="close",
+                data_time_range=data_time_range,
                 metadata={
                     "short_ma": round(current_short_ma, 2),
                     "long_ma": round(current_long_ma, 2),
@@ -298,11 +368,25 @@ This requires `long_window + 1` bars total, ensuring proper "previous vs current
 ### Why Threshold Filter?
 In ranging markets, MAs can cross frequently without meaningful trend changes. The threshold filter (e.g., 50bps = 0.5%) prevents whipsaw trades by requiring minimum MA separation.
 
-### Why Extensive Metadata?
-The metadata field captures MA values at decision time, creating an audit trail. This is crucial for:
+**Division by zero guard:** Always check `current_long_ma != 0` before dividing in threshold calculation to avoid runtime errors.
+
+### Why Cooldown Period?
+In sideways/choppy markets, crossovers can occur frequently, leading to excessive trading and transaction costs. The cooldown parameter (e.g., `cooldown_bars=5`) requires a minimum number of bars between signals, reducing churn.
+
+**Use case:** Beginner traders can set `cooldown_bars=10` to reduce trading frequency and gain confidence before increasing activity.
+
+### Why Extensive Metadata and Enhanced Signal Fields?
+The enhanced Signal schema captures:
+- **decision_time:** The bar-close timestamp (not wall clock) - prevents time leakage in backtests
+- **price_ref / price_type:** The price used for decision - helps execution module reason about slippage
+- **data_time_range:** First/last bar timestamps - creates audit trail of data provenance
+- **metadata:** MA values at decision time - crucial for debugging and verification
+
+This creates a complete audit trail for:
 - Debugging signal generation
 - Verifying strategy correctness
-- Future backtesting analysis
+- Backtesting validation (no time leakage)
+- Slippage analysis in execution
 
 **Reference:** Evidence-Based Technical Analysis (Aronson) - Importance of audit trails
 
