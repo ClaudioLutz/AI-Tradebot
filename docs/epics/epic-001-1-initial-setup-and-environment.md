@@ -1,7 +1,15 @@
-# Epic 001: Initial Setup and Environment Configuration
+# Epic 001-1: Initial Setup and Environment Configuration
 
-## Epic Overview
+**Status:** ⚠️ **LEGACY** - This epic describes the original Alpaca-based prototype. It has been superseded by [Epic 001-2: Saxo Bank Migration](./epic-001-2-saxo-bank-migration.md) for current implementations.
+
+> **Note for New Developers:** If you're setting up the project for the first time, skip to Epic 001-2 for Saxo Bank integration. This epic is retained for historical reference only.
+
+---
+
+## Epic Overview (Historical - Alpaca-based)
 Set up the foundational infrastructure for the trading bot including Alpaca account creation, API key configuration, Python environment setup, and project initialization. This epic ensures all prerequisites are in place before development begins.
+
+**⚠️ This epic has been completed and is no longer the active development path.**
 
 ## Business Value
 - Establishes secure API connectivity to Alpaca paper trading

@@ -16,9 +16,10 @@ Migrate the trading bot from Alpaca API to Saxo Bank OpenAPI (SIM environment), 
 ## Technical Scope
 
 ### Authentication Changes
-- Replace Alpaca's long-lived API keys with Saxo's token-based authentication
-- Support for 24h SIM tokens (developer portal)
-- Foundation for future OAuth implementation (AppKey/AppSecret)
+- Replace Alpaca's long-lived API keys with Saxo's OAuth flow (AppKey/AppSecret)
+- **Primary mode:** OAuth with automatic token refresh for long-running sessions (>24h)
+- **Optional mode:** Manual 24h SIM tokens (developer portal) for quick testing
+- Token persistence and automatic refresh on expiry
 
 ### API Integration Changes
 - Replace `alpaca-trade-api` SDK with direct REST API calls using `requests`
@@ -48,14 +49,16 @@ Migrate the trading bot from Alpaca API to Saxo Bank OpenAPI (SIM environment), 
 10. **Story 001-2-010:** Integration Testing & Migration Documentation
 
 ## Acceptance Criteria
-- [ ] All Alpaca-specific code replaced with Saxo equivalents
-- [ ] Saxo SIM authentication working with 24h token
-- [ ] Connection test successfully validates Saxo API access
-- [ ] Market data retrieval working with UIC-based instruments
+- [x] All Alpaca-specific code replaced with Saxo equivalents
+- [x] OAuth authentication with automatic refresh implemented
+- [x] Manual 24h token mode supported as fallback
+- [x] Connection test successfully validates Saxo API access
+- [x] Client and Account context (ClientKey, AccountKey) retrieved
+- [x] Market data retrieval working with UIC-based instruments
 - [ ] Order precheck and placement functional in SIM environment
 - [ ] All existing tests updated and passing
-- [ ] Migration guide documentation completed
-- [ ] System maintains modular architecture integrity
+- [x] Migration guide documentation completed
+- [x] System maintains modular architecture integrity
 
 ## Technical Risks & Mitigations
 
