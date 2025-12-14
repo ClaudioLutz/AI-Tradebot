@@ -69,6 +69,8 @@ class PositionGuardResult:
 GET /port/v1/netpositions?ClientKey={ClientKey}&FieldGroups=NetPositionBase,NetPositionView
 ```
 
+> **Important**: Use `ClientKey`, not `AccountKey`, for this endpoint.
+
 **Response Structure:**
 ```json
 {
@@ -106,10 +108,10 @@ GET /port/v1/positions?ClientKey={ClientKey}&FieldGroups=PositionBase,PositionVi
 class PositionManager:
     """Manages position queries and caching"""
     
-    def __init__(self, client: SaxoClient, account_key: str, 
+    def __init__(self, client: SaxoClient, client_key: str,
                  cache_ttl_seconds: int = 30):
         self.client = client
-        self.account_key = account_key
+        self.client_key = client_key
         self.cache_ttl = cache_ttl_seconds
         self._position_cache: Dict[Tuple[str, int], Position] = {}
         self._cache_timestamp: Optional[datetime] = None
@@ -128,10 +130,11 @@ class PositionManager:
             return self._position_cache
             
         try:
+            # Bug fix: ClientKey must be used for NetPositions, NOT AccountKey
             response = await self.client.get(
                 "/port/v1/netpositions",
                 params={
-                    "ClientKey": self.account_key,
+                    "ClientKey": self.client_key,
                     "FieldGroups": "NetPositionBase,NetPositionView"
                 }
             )
@@ -145,7 +148,7 @@ class PositionManager:
                 positions[key] = Position(
                     asset_type=pos_base["AssetType"],
                     uic=pos_base["Uic"],
-                    account_key=self.account_key,
+                    account_key=pos_base.get("AccountKey"), # Use AccountKey (GUID), not AccountId (Display)
                     position_id=item["NetPositionId"],
                     net_quantity=Decimal(str(pos_base.get("Amount", 0))),
                     average_price=Decimal(str(pos_view.get("AverageOpenPrice", 0))),

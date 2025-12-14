@@ -34,8 +34,8 @@ x-request-id: {uuid}
 
 #### Portfolio Orders Query
 ```
-GET https://gateway.saxobank.com/sim/openapi/port/v1/orders?OrderId={order_id}
-GET https://gateway.saxobank.com/sim/openapi/port/v1/orders?AccountKey={account_key}&Status=All
+GET https://gateway.saxobank.com/sim/openapi/port/v1/orders?ClientKey={ClientKey}&OrderId={OrderId}
+GET https://gateway.saxobank.com/sim/openapi/port/v1/orders?ClientKey={ClientKey}&Status=All
 Authorization: Bearer {access_token}
 ```
 
@@ -479,8 +479,9 @@ class OrderPlacementClient:
         
         Strategy:
         1. If OrderId available: query by OrderId (most reliable)
-        2. Else: query by AccountKey + time window, search for ExternalReference
-        3. Bounded attempt: single query, then mark as uncertain
+        2. Else: rely on LOCAL STATE first (did we get a 201/202?).
+        3. Last ditch: query by ClientKey + Status=All (scan for ExternalReference)
+           - Note: This is non-contractual and best-effort.
         """
         
         self.logger.info(
@@ -501,8 +502,10 @@ class OrderPlacementClient:
                 )
             
             # Strategy 2: Query by AccountKey + ExternalReference
+            # This is expensive and not guaranteed to return ExternalReference in all views,
+            # but is the only option if OrderId is missing.
             return await self._reconcile_by_external_reference(
-                order_intent.account_key,
+                order_intent.client_key,
                 order_intent.external_reference
             )
             
@@ -522,13 +525,14 @@ class OrderPlacementClient:
     async def _reconcile_by_order_id(
         self,
         order_id: str,
-        external_reference: str
+        external_reference: str,
+        client_key: str
     ) -> ReconciliationOutcome:
-        """Query portfolio orders by OrderId"""
+        """Query portfolio orders by OrderId using ClientKey context"""
         
         try:
             response = await self.saxo_client.get(
-                f"/port/v1/orders?OrderId={order_id}",
+                f"/port/v1/orders?ClientKey={client_key}&OrderId={order_id}",
                 timeout=self.reconciliation_timeout
             )
             
@@ -601,15 +605,21 @@ class OrderPlacementClient:
     
     async def _reconcile_by_external_reference(
         self,
-        account_key: str,
+        client_key: str,
         external_reference: str
     ) -> ReconciliationOutcome:
-        """Query portfolio orders by AccountKey and search for ExternalReference"""
+        """
+        Query portfolio orders by ClientKey and search for ExternalReference.
+
+        Note: This is a 'scan' operation and acts as a last-ditch effort.
+        It assumes the Portfolio API returns ExternalReference, which is common
+        but not strictly guaranteed in all list views.
+        """
         
         try:
-            # Query recent orders for account
+            # Query recent orders for client
             response = await self.saxo_client.get(
-                f"/port/v1/orders?AccountKey={account_key}&Status=All",
+                f"/port/v1/orders?ClientKey={client_key}&Status=All",
                 timeout=self.reconciliation_timeout
             )
             
@@ -658,7 +668,7 @@ class OrderPlacementClient:
             self.logger.warning(
                 "Reconciliation: ExternalReference not found in portfolio",
                 extra={
-                    "account_key": account_key,
+                    "client_key": client_key,
                     "external_reference": external_reference,
                     "orders_checked": len(orders)
                 }
@@ -781,7 +791,8 @@ SUCCESS  FAILURE SUCCESS  FAILURE  UNCERTAIN
    - On success, OrderId is captured and logged.
    - On failure, ErrorInfo is logged and no further action is attempted for that intent.
 4. Timeouts / TradeNotCompleted handling:
-   - If OrderId is present, executor queries Portfolio orders to determine current order status.
+   - If OrderId is present, executor queries Portfolio orders (using `ClientKey` + `OrderId`) to determine current order status.
+   - If OrderId is missing, executor attempts to scan portfolio by `ClientKey` looking for `ExternalReference` (best effort).
    - Reconciliation outcome is logged (e.g., "placed", "not found", "unknown").
 5. Placement is never attempted if precheck failed or disclaimers policy blocks the trade.
 6. If placement fails and returns `PreTradeDisclaimers`, the executor captures and logs them (same shape as precheck: `DisclaimerContext: string`, `DisclaimerTokens: string[]`) so operators can resolve via the DM flow.

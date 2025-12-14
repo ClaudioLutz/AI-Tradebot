@@ -26,8 +26,11 @@ Out of scope:
 2. For Stock and FxSpot:
    - Amount is validated to match `AmountDecimals`.
    - Amount respects `IncrementSize` when present (e.g., FX increments).
+   - Tick sizes / price steps are enforced (REJECT if invalid, do not silently round unless explicitly configured).
+   - Amount decimals are strictly enforced.
 3. Module validates that `OrderType='Market'` is supported for the instrument (via SupportedOrderTypes).
 4. Module validates that chosen `OrderDuration.DurationType` (default DayOrder) is supported for Market orders when the instrument provides duration-type restrictions.
+5. (Optional/Future) `OrderDistances` are checked for Limit/Stop orders (ensure distances meet minimums).
 5. If `IsTradable` is false (or `NonTradableReason` indicates not tradable), executor refuses to place and logs a structured reason.
 6. Instrument-details lookup failures do not crash orchestration; they result in a failed execution with actionable logging.
 
@@ -56,6 +59,9 @@ class InstrumentConstraints:
     lot_size: Optional[float] = None  # Standard lot size
     minimum_trade_size: Optional[float] = None
     
+    # Price/Tick rules
+    tick_size: Optional[float] = None  # Minimum price step
+
     # Supported order types
     supported_order_types: list[str] = None
     supported_durations: Dict[str, list[str]] = None  # {OrderType: [DurationTypes]}
@@ -117,14 +123,27 @@ class InstrumentConstraints:
         
         # Check increment size
         if self.increment_size and self.increment_size > 0:
+            # Use epsilon for float modulo
             remainder = amount % self.increment_size
-            if remainder > 1e-10:  # Allow tiny floating point errors
+            # If remainder is close to 0 or close to increment_size, it's valid
+            if remainder > 1e-10 and abs(remainder - self.increment_size) > 1e-10:
                 return False, f"Amount {amount} not aligned with increment size {self.increment_size}"
         
         # Check minimum trade size
         if self.minimum_trade_size and amount < self.minimum_trade_size:
             return False, f"Amount {amount} below minimum trade size {self.minimum_trade_size}"
         
+        return True, None
+
+    def validate_price(self, price: float) -> tuple[bool, Optional[str]]:
+        """
+        Validate price against tick size constraints (for Limit/Stop orders).
+        Returns: (is_valid, error_message)
+        """
+        if self.tick_size and self.tick_size > 0:
+            remainder = price % self.tick_size
+            if remainder > 1e-10 and abs(remainder - self.tick_size) > 1e-10:
+                return False, f"Price {price} not aligned with tick size {self.tick_size}"
         return True, None
 
 
@@ -234,6 +253,7 @@ class InstrumentValidator:
         increment_size = data.get("IncrementSize")
         lot_size = data.get("LotSize")
         minimum_trade_size = data.get("MinimumTradeSize")
+        tick_size = data.get("TickSize") # Saxo field for tick size
         
         # Order type support
         supported_order_types = []
@@ -261,6 +281,7 @@ class InstrumentValidator:
             increment_size=increment_size,
             lot_size=lot_size,
             minimum_trade_size=minimum_trade_size,
+            tick_size=tick_size,
             supported_order_types=supported_order_types,
             supported_durations=supported_durations,
             uic=uic,
@@ -309,6 +330,13 @@ class InstrumentValidator:
             if not is_valid:
                 return False, error
             
+            # Validate price (if Limit/Stop)
+            # Note: For Market orders, price is not validated
+            if intent.order_type.value in ["Limit", "Stop"] and hasattr(intent, "price") and intent.price:
+                 is_valid, error = constraints.validate_price(intent.price)
+                 if not is_valid:
+                     return False, error
+
             return True, None
             
         except ValueError as e:

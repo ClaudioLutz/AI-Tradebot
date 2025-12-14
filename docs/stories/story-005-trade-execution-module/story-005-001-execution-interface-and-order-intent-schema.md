@@ -11,7 +11,7 @@ in a way that is safe, testable, and debuggable. A stable schema is needed so do
 ## Scope
 In scope:
 - Define `TradeExecutor` (or equivalent) interface and core DTOs:
-  - `OrderIntent` (instrument, side, quantity, order type, duration, correlation fields)
+  - `OrderIntent` (client_key, account_key, instrument, side, quantity, order type, duration, correlation fields)
   - `PrecheckResult` (normalized success/failure + cost/margin fields + disclaimers payload)
   - `ExecutionResult` (dry-run vs sim outcomes, order id(s), reconciliation status)
 - Define correlation fields:
@@ -25,15 +25,16 @@ Out of scope:
 
 ## Acceptance Criteria
 1. `OrderIntent` supports the minimum fields needed to place Stock and FxSpot market orders:
-   `(account_key, asset_type, uic, buy_sell, amount, order_type='Market', order_duration, external_reference, request_id)`.
+   `(client_key, account_key, asset_type, uic, buy_sell, amount, order_type='Market', order_duration, external_reference, request_id)`.
 2. `external_reference` is generated for every intent and is validated to be <= 50 characters.
 3. `request_id` is generated for every mutation attempt and is emitted as `x-request-id` for:
    - POST /trade/v2/orders/precheck (correlation + helps avoid tight-loop duplicate behavior)
    - POST /trade/v2/orders
    - PATCH /trade/v2/orders (future)
    - DELETE /trade/v2/orders (future)
+   - **Rule**: Reuse `request_id` ONLY for idempotent retries of the exact same operation. Regenerate `request_id` for new attempts or when modifying parameters.
 4. Logging context contains at minimum:
-   `{instrument_id, asset_type, uic, symbol, account_key, external_reference, request_id, order_id?, http_status?}`.
+   `{instrument_id, asset_type, uic, symbol, client_key, account_key, external_reference, request_id, order_id?, http_status?}`.
 5. Interface supports `dry_run: bool` to drive DRY_RUN vs SIM behavior, without changing caller code.
 
 ## Technical Implementation Details
@@ -77,6 +78,7 @@ class OrderIntent:
     Represents a trade intention before validation/precheck.
     Maps directly to Saxo OpenAPI order request schema.
     """
+    client_key: str   # Saxo ClientKey (required for Portfolio queries)
     account_key: str  # Saxo AccountKey (e.g., "Cf4xZWiYL6W1nMKpygBLLA==")
     asset_type: AssetType  # Stock, FxSpot, etc.
     uic: int  # Universal Instrument Code
@@ -320,6 +322,7 @@ def create_execution_log_context(intent: OrderIntent, result: ExecutionResult) -
         "order_type": intent.order_type.value,
         
         # Correlation fields
+        "client_key": intent.client_key,
         "account_key": intent.account_key,
         "external_reference": intent.external_reference,
         "request_id": intent.request_id,
@@ -355,6 +358,7 @@ def log_execution(intent: OrderIntent, result: ExecutionResult, logger: logging.
 - x-request-id:
   - Generate a UUIDv4 per placement attempt and persist it in logs.
   - Do not reuse request_id across attempts unless you explicitly want Saxo to treat the operation as the same.
+  - **Explicit Rule**: If a request fails with an ambiguous error (timeout) and you wish to retry *idempotently*, use the same `request_id`. If you are retrying because of a logical rejection or starting a fresh attempt sequence, generate a *new* `request_id` to avoid 409 Conflict / duplicate detection windows.
 - Default order duration:
   - For market orders, prefer `DayOrder` unless strategy-specific configuration says otherwise.
 
@@ -375,6 +379,7 @@ from execution.models import OrderIntent, AssetType, BuySell, OrderType
 def test_external_reference_max_length():
     """Test that external_reference exceeding 50 chars raises error"""
     intent = OrderIntent(
+        client_key="client_123",
         account_key="test_key",
         asset_type=AssetType.STOCK,
         uic=211,
@@ -389,6 +394,7 @@ def test_external_reference_max_length():
 def test_intent_to_saxo_request_mapping():
     """Test OrderIntent maps correctly to Saxo API format"""
     intent = OrderIntent(
+        client_key="client_123",
         account_key="Cf4xZWiYL6W1nMKpygBLLA==",
         asset_type=AssetType.STOCK,
         uic=211,
