@@ -40,10 +40,11 @@ x-request-id: {uuid}
 GET /dm/v2/disclaimers?DisclaimerTokens=DM_RISK_WARNING_2025_Q1&DisclaimerTokens=DM_REGULATORY_NOTICE_EU
 ```
 
-**DEPRECATED patterns** (do not use):
+**DEPRECATED / INCORRECT patterns** (do not use):
 - ❌ `Token=` (wrong parameter name)
 - ❌ `/dm/v2/disclaimers/responses` (wrong endpoint)
 - ❌ `Accepted: true/false` (wrong request body structure)
+- ❌ Flat object parsing (Saxo returns a Data[] envelope)
 
 **Response envelope**: This endpoint returns a **Data feed structure** (array), not a flat single object. See parsing example below.
 
@@ -315,6 +316,7 @@ class DisclaimerService:
         
         elif self.config.policy == DisclaimerPolicy.AUTO_ACCEPT_NORMAL:
             # Attempt to auto-accept normal disclaimers (pass details, not tokens)
+            # CRITICAL: Only proceed if "Accept" is an available option that requires NO user input.
             auto_accepted, errors = await self._auto_accept_disclaimers(
                 normal,  # List[DisclaimerDetails] where IsBlocking == False
                 precheck_outcome.pre_trade_disclaimers.disclaimer_context,

@@ -115,7 +115,13 @@ class MarginImpactBuySell:
 
 @dataclass
 class PreTradeDisclaimers:
-    """Pre-trade disclaimer data from precheck/placement response"""
+    """
+    Pre-trade disclaimer data from precheck/placement response.
+    
+    Structure aligned with Saxo breaking change:
+    - DisclaimerContext: string (opaque context ID)
+    - DisclaimerTokens: string[] (list of tokens to resolve via DM)
+    """
     disclaimer_context: str
     disclaimer_tokens: List[str]  # List of disclaimer token strings
 

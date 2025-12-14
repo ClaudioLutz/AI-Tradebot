@@ -134,6 +134,30 @@ class TokenBucketRateLimiter:
                 reset_after_seconds=int(reset_after_seconds),
                 wait_until_computed=round(self._wait_until, 2)
             )
+
+    @property
+    def is_locked(self) -> bool:
+        """Check if rate limiter is currently in a reset wait period"""
+        return self._wait_until is not None and time.time() < self._wait_until
+```
+
+### Rate Limiter Scope & Lifecycle
+
+**CRITICAL: Session-Based Scoping**
+
+Saxo rate limits are enforced per **session** (OAuth token). 
+- Do NOT use a global rate limiter if the application manages multiple sessions (e.g., different users or segregated trading contexts).
+- Each `TradeExecutor` instance should own its rate limiter, initialized with the session it uses.
+- If multiple components share a session, they MUST share the same `TokenBucketRateLimiter` instance.
+
+```python
+class SessionContext:
+    """Holds session-scoped resources"""
+    def __init__(self, token: str):
+        self.token = token
+        # One limiter per session
+        self.rate_limiter = TokenBucketRateLimiter(RateLimitConfig())
+```
 ```
 
 ### Rate Limit Header Parser
@@ -659,7 +683,15 @@ class OrderExecutor:
             raise
     
     async def reconcile_and_retry(self, intent: OrderIntent) -> OrderResult:
-        """Reconcile before retry (Invariant 4)"""
+        """
+        Reconcile before retry (Invariant 4)
+        
+        Strategy:
+        1. Attempt to find order by OrderId (if we have a partial response)
+        2. Attempt to find order by ExternalReference (best effort)
+        3. If found: Return existing order
+        4. If not found: Safe to retry (with new request_id)
+        """
         
         logger.info(
             "reconciling_before_retry",
@@ -667,12 +699,16 @@ class OrderExecutor:
         )
         
         # Query existing orders
+        # Saxo does not guarantee uniqueness of ExternalReference, but it's our best key if OrderId is missing.
+        # We rely on our own discipline of unique ExternalReference generation.
         orders = await self.portfolio.query_orders(
             external_reference=intent.external_reference
         )
         
         if orders:
             # Found existing order
+            # Note: In a production system, verify the order details (Side, Asset, Amount) match intent
+            # to protect against ExternalReference collisions.
             logger.info(
                 "order_found_skipping_retry",
                 external_reference=intent.external_reference,
@@ -694,6 +730,20 @@ class OrderExecutor:
         # Clear timeout state and retry
         self.intent_tracker.clear_state(intent.external_reference)
         return await self.place_order(intent)
+```
+
+## Contract Anchors
+
+> **Normative Source**: [Saxo Rate Limiting Guide](https://www.developer.saxo/openapi/learn/rate-limiting)
+
+1. **Session Scope**: "Limits are per session." 
+   - *Rule*: Rate limiters must be instantiated per OAuth token.
+2. **Reset Header**: `X-RateLimit-SessionOrders-Reset` returns **seconds remaining** (duration).
+   - *Rule*: Code must treat this as a duration, not a timestamp.
+3. **Duplicate Window**: 15-second rolling window for identical operations.
+   - *Rule*: Unique `x-request-id` is required to bypass this window intentionally (e.g., retries).
+4. **Reconciliation**: If a 202/201 response is lost (timeout), the order might exist.
+   - *Rule*: Must query portfolio before retrying placement.
 ```
 
 ## Implementation Notes

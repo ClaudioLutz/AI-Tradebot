@@ -11,10 +11,10 @@ auction states as a cross-cutting policy decision; Epic 005 must formalize the d
 ## Scope
 In scope:
 - Define and implement an execution gate `is_trading_allowed(market_state)` with safe defaults.
-- Default policy (recommended):
-  - Allow: Open
-  - Block: Closed, Unknown, OpeningAuction, ClosingAuction, IntraDayAuction, TradingAtLast
-  - Configurable overrides for advanced users (e.g., allow PreMarket/PostMarket for specific instruments)
+- **Safe Default Policy**:
+  - **Allow**: `Open`
+  - **Block**: `Closed`, `Unknown`, `OpeningAuction`, `ClosingAuction`, `IntraDayAuction`, `TradingAtLast`
+  - **Overrides**: Allow per-asset-type overrides (e.g., `FxSpot` might allow `PreMarket`/`PostMarket`), but the global default must remain conservative.
 - Determine market state using the best available source (in priority order):
   1) Latest Quote/Price snapshot MarketState (if available from market data module)
   2) Portfolio position/open-order market-state fields (if present)
@@ -577,6 +577,15 @@ This market state policy is consistent with Epic 004's data quality gating conce
 **Consistency Check**:
 - If Epic 004 allows signal generation during PreMarket, but Epic 005 blocks PreMarket execution (default), the order will be blocked with clear logging
 - Asset-type overrides ensure both epics can be configured consistently for 24-hour markets (FX)
+
+## Contract Anchors
+
+> **Normative Source**: [Saxo Market State Schema](https://www.developer.saxo/openapi/referencedocs/trade/v1/prices/post__trade__multileg/schema-marketstate)
+
+1. **Canonical Enum**: `Open`, `Closed`, `OpeningAuction`, `ClosingAuction`, `IntraDayAuction`, `TradingAtLast`, `PreMarket`, `PostMarket`, `Unknown`.
+2. **Safe Trading State**: Generally only `Open`.
+3. **Auction States**: `OpeningAuction`, `ClosingAuction`, `IntraDayAuction`.
+   - *Rule*: Default policy MUST block these for exchange-traded instruments to avoid unexpected pricing/liquidity.
 
 ## Primary Sources
 - https://www.developer.saxo/openapi/referencedocs/trade/v1/prices/post__trade__multileg/schema-marketstate
