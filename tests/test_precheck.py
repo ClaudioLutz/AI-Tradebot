@@ -1,8 +1,8 @@
 import pytest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from decimal import Decimal
-from execution.precheck import PrecheckClient, PrecheckOutcome, ErrorInfo, RetryConfig
-from execution.models import OrderIntent, AssetType, BuySell
+from execution.precheck import PrecheckClient, RetryConfig
+from execution.models import OrderIntent, AssetType, BuySell, PrecheckResult
 
 @pytest.fixture
 def mock_saxo_client():
@@ -17,7 +17,7 @@ def order_intent():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal(100),
         external_reference="ref_1"
     )
 
@@ -33,10 +33,10 @@ def test_precheck_success(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert outcome.ok
-    assert outcome.estimated_cost.amount == Decimal("10.5")
-    assert outcome.estimated_cost.currency == "USD"
-    assert outcome.margin_impact_buy_sell.amount == Decimal("500")
+    assert outcome.success
+    assert outcome.estimated_cost == 10.5
+    assert outcome.estimated_currency == "USD"
+    assert outcome.margin_impact == 500.0
 
 def test_precheck_validation_failure(mock_saxo_client, order_intent):
     """Test precheck validation failure (HTTP 200 with ErrorInfo)"""
@@ -52,9 +52,9 @@ def test_precheck_validation_failure(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert not outcome.ok
-    assert outcome.error_info.error_code == "InsufficientFunds"
-    assert outcome.error_info.message == "Not enough money"
+    assert not outcome.success
+    assert outcome.error_code == "InsufficientFunds"
+    assert outcome.error_message == "Not enough money"
 
 def test_precheck_legacy_margin(mock_saxo_client, order_intent):
     """Test fallback for legacy MarginImpact field"""
@@ -67,8 +67,8 @@ def test_precheck_legacy_margin(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert outcome.ok
-    assert outcome.margin_impact_buy_sell.amount == Decimal("100")
+    assert outcome.success
+    assert outcome.margin_impact == 100.0
 
 def test_precheck_disclaimers(mock_saxo_client, order_intent):
     """Test parsing of PreTradeDisclaimers"""
@@ -84,15 +84,14 @@ def test_precheck_disclaimers(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert outcome.ok
-    assert outcome.pre_trade_disclaimers.disclaimer_context == "ctx123"
-    assert outcome.pre_trade_disclaimers.disclaimer_tokens == ["RISK_WARN"]
+    assert outcome.success
+    assert outcome.disclaimer_context == "ctx123"
+    assert outcome.disclaimer_tokens == ["RISK_WARN"]
 
 def test_http_exception_handling(mock_saxo_client, order_intent):
     """Test handling of HTTP exceptions from saxo client"""
     client = PrecheckClient(mock_saxo_client)
 
-    # Simulate an exception that has a status_code attribute
     class SaxoError(Exception):
         status_code = 400
 
@@ -100,21 +99,18 @@ def test_http_exception_handling(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert not outcome.ok
-    assert outcome.http_status == 400
-    assert outcome.error_info.error_code == "HTTP_ERROR"
+    assert not outcome.success
+    assert outcome.error_code == "HTTP_400"
+    assert "Bad Request" in outcome.error_message
 
 def test_retry_logic(mock_saxo_client, order_intent):
     """Test that retry happens on transient errors"""
     client = PrecheckClient(mock_saxo_client)
-
-    # Configure retry to be fast
     client.retry_config = RetryConfig(max_retries=1, backoff_base_seconds=0.01)
 
     class SaxoTransientError(Exception):
         status_code = 503
 
-    # First call fails with 503, second succeeds
     mock_saxo_client.post.side_effect = [
         SaxoTransientError("Service Unavailable"),
         {"PreCheckResult": "Ok"}
@@ -122,7 +118,7 @@ def test_retry_logic(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert outcome.ok
+    assert outcome.success
     assert mock_saxo_client.post.call_count == 2
 
 def test_retry_exhaustion(mock_saxo_client, order_intent):
@@ -137,6 +133,6 @@ def test_retry_exhaustion(mock_saxo_client, order_intent):
 
     outcome = client.execute_precheck(order_intent)
 
-    assert not outcome.ok
-    assert outcome.http_status == 503
-    assert mock_saxo_client.post.call_count == 2  # Initial + 1 retry
+    assert not outcome.success
+    assert outcome.error_code == "HTTP_503"
+    assert mock_saxo_client.post.call_count == 2

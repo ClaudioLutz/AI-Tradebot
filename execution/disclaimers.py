@@ -1,22 +1,18 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 from enum import Enum
 import time
 import uuid
 import logging
-import httpx
-from requests.exceptions import Timeout
-import requests
 
-from execution.models import OrderIntent
-from execution.precheck import PrecheckOutcome
+from execution.models import OrderIntent, PrecheckResult
 
 logger = logging.getLogger(__name__)
 
 class DisclaimerPolicy(Enum):
     BLOCK_ALL = "block_all"  # Safe default: block on any disclaimer
-    AUTO_ACCEPT_NORMAL = "auto_accept_normal"  # Auto-accept Normal, block on Blocking
+    AUTO_ACCEPT_NORMAL = "auto_accept_normal"  # Auto-accept Normal if simple, block on Blocking or complex
     MANUAL_REVIEW = "manual_review"  # Log and require manual intervention
 
 @dataclass
@@ -32,6 +28,7 @@ class DisclaimerDetails:
     title: str
     body: str
     response_options: list[dict]
+    conditions: list[dict] = field(default_factory=list)
     retrieved_at: datetime = None
 
 @dataclass
@@ -63,7 +60,7 @@ class DisclaimerService:
 
     def evaluate_disclaimers(
         self,
-        precheck_outcome: PrecheckOutcome,
+        precheck_result: PrecheckResult,
         order_intent: OrderIntent
     ) -> DisclaimerResolutionOutcome:
         """
@@ -71,7 +68,7 @@ class DisclaimerService:
         Synchronous wrapper.
         """
         # No disclaimers = trading allowed
-        if not precheck_outcome.pre_trade_disclaimers or not precheck_outcome.pre_trade_disclaimers.disclaimer_tokens:
+        if not precheck_result.disclaimer_tokens:
             return DisclaimerResolutionOutcome(
                 allow_trading=True,
                 blocking_disclaimers=[],
@@ -81,11 +78,11 @@ class DisclaimerService:
                 policy_applied=self.config.policy
             )
 
-        disclaimers = precheck_outcome.pre_trade_disclaimers
+        disclaimer_tokens = precheck_result.disclaimer_tokens
 
         # Fetch disclaimer details to classify them
         disclaimer_details = self._fetch_disclaimer_details_batch(
-            disclaimers.disclaimer_tokens,
+            disclaimer_tokens,
             order_intent
         )
 
@@ -97,7 +94,7 @@ class DisclaimerService:
             "Evaluating disclaimers",
             extra={
                 "external_reference": order_intent.external_reference,
-                "total_disclaimers": len(disclaimers.disclaimer_tokens),
+                "total_disclaimers": len(disclaimer_tokens),
                 "blocking_count": len(blocking),
                 "normal_count": len(normal),
                 "policy": self.config.policy.value
@@ -133,7 +130,7 @@ class DisclaimerService:
             # Attempt to auto-accept normal disclaimers
             auto_accepted, errors = self._auto_accept_disclaimers(
                 normal,
-                disclaimers.disclaimer_context,
+                precheck_result.disclaimer_context,
                 order_intent
             )
 
@@ -218,6 +215,7 @@ class DisclaimerService:
                     title="Unknown Disclaimer",
                     body=f"Failed to retrieve details: {str(e)}",
                     response_options=[],
+                    conditions=[],
                     retrieved_at=datetime.utcnow()
                 ))
 
@@ -229,44 +227,24 @@ class DisclaimerService:
     ) -> DisclaimerDetails:
         """
         Retrieve disclaimer details from Saxo DM service.
-        Uses in-memory cache with TTL to avoid repeated calls.
         """
-
-        # Check cache
         now = time.time()
         if token in self._cache:
             details, cached_at = self._cache[token]
             if now - cached_at < self.config.cache_ttl_seconds:
-                self.logger.debug(f"Using cached disclaimer details for {token}")
                 return details
 
-        # Fetch from API
-        self.logger.debug(f"Fetching disclaimer details for {token}")
-
         try:
-            # Batch endpoint uses DisclaimerTokens[]; if we do per-token fetch (fallback), still use DisclaimerTokens
-            # Note: saxo_client.get param values can be lists if supported, or we might need to construct query string manually
-            # But here we are fetching one by one as per loop above (though batch is better, simpler for now to loop)
-            # The client wrapper usually handles params.
-            # If saxo_client.get handles list params correctly (repeated keys), we could do batch.
-            # But let's stick to single token fetching inside _get_disclaimer_details which is called in a loop.
-
             response = self.saxo_client.get(
                 "/dm/v2/disclaimers",
                 params={"DisclaimerTokens": token}
             )
+            data = response.json() if hasattr(response, 'json') else response
 
-            # response is expected to be dict or have .json()
-            data = response
-            if hasattr(response, 'json'):
-                 data = response.json()
-
-            # CRITICAL: DM endpoint returns a Data[] feed, not a flat object
-            # Parse the first item from the Data array
             if "Data" not in data or not data["Data"]:
                 raise Exception(f"No disclaimer data returned for token {token}")
 
-            disclaimer_item = data["Data"][0]  # Single token query returns one item
+            disclaimer_item = data["Data"][0]
 
             details = DisclaimerDetails(
                 disclaimer_token=disclaimer_item["DisclaimerToken"],
@@ -274,12 +252,11 @@ class DisclaimerService:
                 title=disclaimer_item.get("Title", ""),
                 body=disclaimer_item.get("Body", ""),
                 response_options=list(disclaimer_item.get("ResponseOptions", [])),
+                conditions=list(disclaimer_item.get("Conditions", [])),
                 retrieved_at=datetime.utcnow()
             )
 
-            # Cache the result
             self._cache[token] = (details, now)
-
             return details
 
         except Exception as e:
@@ -288,45 +265,50 @@ class DisclaimerService:
     def _auto_accept_disclaimers(
         self,
         disclaimer_details: List[DisclaimerDetails],
-        disclaimer_context: str,
+        disclaimer_context: Optional[str],
         order_intent: OrderIntent
     ) -> tuple[List[str], List[str]]:
         """
-        Auto-accept non-blocking disclaimers.
+        Auto-accept non-blocking disclaimers if they meet criteria (no conditions, simple acceptance).
         """
         accepted = []
         errors = []
 
+        if not disclaimer_context:
+            errors.append("Missing DisclaimerContext for auto-acceptance")
+            return accepted, errors
+
         for details in disclaimer_details:
-            # DEFENSIVE CHECK: Never auto-accept blocking disclaimers
             if details.is_blocking:
-                error_msg = f"Attempted to auto-accept BLOCKING disclaimer {details.disclaimer_token} - BLOCKED"
-                self.logger.critical(
-                    error_msg,
-                    extra={
-                        "disclaimer_token": details.disclaimer_token,
-                        "is_blocking": details.is_blocking,
-                        "external_reference": order_intent.external_reference
-                    }
-                )
-                errors.append(error_msg)
+                errors.append(f"Cannot auto-accept blocking disclaimer {details.disclaimer_token}")
                 continue
 
+            # CHECK 1: Conditions
+            if details.conditions:
+                errors.append(f"Disclaimer {details.disclaimer_token} has conditions requiring user input")
+                continue
+
+            # CHECK 2: Response Options
+            # We look for a simple "Accepted" option.
+            # If multiple options exist, we need to be sure "Accepted" is the intended one and no user choice is implicitly required (like "Dismissed" vs "Accepted").
+            # Saxo policy: If user input/conditions required, we can't auto-accept.
+            # ResponseOptions usually contains valid values for ResponseType.
+
+            valid_responses = [opt.get("Value") for opt in details.response_options]
+
+            if "Accepted" not in valid_responses:
+                errors.append(f"Disclaimer {details.disclaimer_token} does not offer 'Accepted' response option. Options: {valid_responses}")
+                continue
+
+            # If multiple options, but Accepted is one, is it safe?
+            # E.g. "Accepted", "Declined". If we auto-accept, we choose Accepted.
+            # E.g. "Accepted", "Dismissed".
+            # The risk is if the user SHOULD have made a choice.
+            # But "AUTO_ACCEPT_NORMAL" implies we want to accept if possible.
+            # As long as there are no "Conditions", we assume we can Accept.
+
             try:
-                self.logger.info(
-                    "Auto-accepting normal disclaimer",
-                    extra={
-                        "disclaimer_token": details.disclaimer_token,
-                        "title": details.title,
-                        "is_blocking": details.is_blocking,
-                        "external_reference": order_intent.external_reference
-                    }
-                )
-
-                # Register acceptance with DM service
                 request_id = str(uuid.uuid4())
-
-                # saxo_client.post(endpoint, json_body, headers)
                 self.saxo_client.post(
                     "/dm/v2/disclaimers",
                     json_body={
@@ -339,25 +321,9 @@ class DisclaimerService:
                 )
 
                 accepted.append(details.disclaimer_token)
-                self.logger.info(
-                    "Disclaimer accepted successfully",
-                    extra={
-                        "disclaimer_token": details.disclaimer_token,
-                        "request_id": request_id,
-                        "external_reference": order_intent.external_reference
-                    }
-                )
 
             except Exception as e:
-                error_msg = f"Error accepting disclaimer {details.disclaimer_token}: {str(e)}"
-                self.logger.exception(
-                    "Exception while auto-accepting disclaimer",
-                    extra={
-                        "disclaimer_token": details.disclaimer_token,
-                        "external_reference": order_intent.external_reference
-                    }
-                )
-                errors.append(error_msg)
+                errors.append(f"Error accepting disclaimer {details.disclaimer_token}: {str(e)}")
 
         return accepted, errors
 
@@ -367,21 +333,8 @@ class DisclaimerService:
             extra={
                 "external_reference": order_intent.external_reference,
                 "blocking_tokens": [d.disclaimer_token for d in blocking],
-                "account_key": order_intent.account_key,
-                "uic": order_intent.uic
             }
         )
-        for detail in blocking:
-            self.logger.warning(
-                "Blocking disclaimer detail",
-                extra={
-                    "disclaimer_token": detail.disclaimer_token,
-                    "is_blocking": detail.is_blocking,
-                    "title": detail.title,
-                    "body": detail.body[:200] + "..." if len(detail.body) > 200 else detail.body,
-                    "external_reference": order_intent.external_reference
-                }
-            )
 
     def _log_normal_disclaimers(self, normal: List[DisclaimerDetails], order_intent: OrderIntent, policy_name: str):
         self.logger.warning(
@@ -389,17 +342,5 @@ class DisclaimerService:
             extra={
                 "external_reference": order_intent.external_reference,
                 "normal_tokens": [d.disclaimer_token for d in normal],
-                "account_key": order_intent.account_key
             }
         )
-        for detail in normal:
-            self.logger.warning(
-                "Normal disclaimer detail",
-                extra={
-                    "disclaimer_token": detail.disclaimer_token,
-                    "is_blocking": detail.is_blocking,
-                    "title": detail.title,
-                    "body": detail.body[:200] + "..." if len(detail.body) > 200 else detail.body,
-                    "external_reference": order_intent.external_reference
-                }
-            )

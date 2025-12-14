@@ -10,12 +10,12 @@ from datetime import datetime
 from execution.models import OrderIntent, ExecutionResult, ExecutionStatus, AssetType
 from execution.validation import InstrumentValidator
 from execution.position import PositionManager, PositionAwareGuards, ExecutionConfig as PositionConfig
-from execution.precheck import PrecheckClient, PrecheckOutcome, RetryConfig as PrecheckRetryConfig
+from execution.precheck import PrecheckClient, RetryConfig as PrecheckRetryConfig
 from execution.placement import OrderPlacementClient, PlacementConfig, ExecutionOutcome, PlacementStatus
 from execution.disclaimers import DisclaimerService, DisclaimerConfig, DisclaimerResolutionOutcome
+from execution.utils import RateLimitedSaxoClient
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TradeExecutor(ABC):
@@ -51,28 +51,30 @@ class SaxoTradeExecutor(TradeExecutor):
         client_key: str,
         config: Dict[str, Any] = None
     ):
-        self.client = saxo_client
+        # Wrap client with rate limiting logic
+        self.client = RateLimitedSaxoClient(saxo_client)
+
         self.account_key = account_key
         self.client_key = client_key
         self.config = config or {}
         
-        # Initialize components
-        self.validator = InstrumentValidator(saxo_client)
+        # Initialize components with the WRAPPED client
+        self.validator = InstrumentValidator(self.client)
         
         position_config = PositionConfig(
             duplicate_buy_policy=self.config.get("duplicate_buy_policy", "block"),
             allow_short_covering=self.config.get("allow_short_covering", False)
         )
-        self.position_manager = PositionManager(saxo_client, client_key)
+        self.position_manager = PositionManager(self.client, client_key)
         self.guards = PositionAwareGuards(self.position_manager, position_config)
         
         precheck_retry = PrecheckRetryConfig()
-        self.precheck_client = PrecheckClient(saxo_client, precheck_retry)
+        self.precheck_client = PrecheckClient(self.client, precheck_retry)
         
         disclaimer_config = DisclaimerConfig(
             policy=self.config.get("disclaimer_policy", DisclaimerConfig().policy)
         )
-        self.disclaimer_service = DisclaimerService(saxo_client, disclaimer_config)
+        self.disclaimer_service = DisclaimerService(self.client, disclaimer_config)
         
         # Placement client initialized per execute call to inject dry_run config?
         # Or initialized here. PlacementConfig takes dry_run.
@@ -149,28 +151,21 @@ class SaxoTradeExecutor(TradeExecutor):
         # But if guard allowed it, we proceed.
 
         # 3. Precheck
-        precheck_outcome = self.precheck_client.execute_precheck(intent)
+        precheck_result = self.precheck_client.execute_precheck(intent)
         
-        if not precheck_outcome.ok:
-            error_msg = precheck_outcome.error_info.message if precheck_outcome.error_info else "Unknown precheck error"
+        if not precheck_result.success:
+            error_msg = precheck_result.error_message or "Unknown precheck error"
             logger.warning(f"Precheck failed: {error_msg}")
             return ExecutionResult(
                 status=ExecutionStatus.FAILED_PRECHECK,
                 order_intent=intent,
-                precheck_result=precheck_outcome, # Mapping needed if types differ?
-                # ExecutionResult expects PrecheckResult (from models),
-                # but I have PrecheckOutcome (from precheck).
-                # They are similar but not identical. I should map them.
-                # Or update ExecutionResult to use PrecheckOutcome.
-                # Story 005-001 defined PrecheckResult. Story 005-003 defined PrecheckOutcome.
-                # Ideally they should be the same.
-                # I will map PrecheckOutcome to PrecheckResult for the return value.
+                precheck_result=precheck_result,
                 error_message=f"Precheck failed: {error_msg}",
                 timestamp=datetime.utcnow().isoformat()
             )
 
         # 4. Disclaimer Handling
-        disclaimer_outcome = self.disclaimer_service.evaluate_disclaimers(precheck_outcome, intent)
+        disclaimer_outcome = self.disclaimer_service.evaluate_disclaimers(precheck_result, intent)
 
         if not disclaimer_outcome.allow_trading:
             # Construct error message
@@ -197,7 +192,7 @@ class SaxoTradeExecutor(TradeExecutor):
         placement_config = PlacementConfig(dry_run=dry_run)
         placement_client = OrderPlacementClient(self.client, placement_config)
         
-        execution_outcome = placement_client.place_order(intent, precheck_outcome)
+        execution_outcome = placement_client.place_order(intent, precheck_result)
         
         # Map ExecutionOutcome to ExecutionResult
         status = ExecutionStatus.SUCCESS

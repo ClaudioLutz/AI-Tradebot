@@ -1,12 +1,8 @@
 import pytest
-from unittest.mock import Mock, patch
-from execution.disclaimers import (
-    DisclaimerService, DisclaimerConfig, DisclaimerPolicy,
-    DisclaimerDetails, DisclaimerResolutionOutcome
-)
-from execution.models import OrderIntent, AssetType, BuySell
-from execution.precheck import PrecheckOutcome, PreTradeDisclaimers
-from datetime import datetime
+from unittest.mock import Mock
+from decimal import Decimal
+from execution.disclaimers import DisclaimerService, DisclaimerConfig, DisclaimerPolicy, DisclaimerDetails
+from execution.models import OrderIntent, AssetType, BuySell, PrecheckResult
 
 @pytest.fixture
 def mock_saxo_client():
@@ -20,15 +16,15 @@ def order_intent():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal(100),
         external_reference="ref_1"
     )
 
 def test_no_disclaimers_allows_trading(mock_saxo_client, order_intent):
     service = DisclaimerService(mock_saxo_client)
-    precheck_outcome = PrecheckOutcome(ok=True, pre_trade_disclaimers=None)
+    precheck_result = PrecheckResult(success=True)
 
-    outcome = service.evaluate_disclaimers(precheck_outcome, order_intent)
+    outcome = service.evaluate_disclaimers(precheck_result, order_intent)
 
     assert outcome.allow_trading
     assert not outcome.blocking_disclaimers
@@ -38,12 +34,10 @@ def test_blocking_disclaimer_blocks_trading(mock_saxo_client, order_intent):
     """Test that blocking disclaimers always block trading"""
     service = DisclaimerService(mock_saxo_client)
 
-    precheck_outcome = PrecheckOutcome(
-        ok=True,
-        pre_trade_disclaimers=PreTradeDisclaimers(
-            disclaimer_context="ctx",
-            disclaimer_tokens=["BLOCKING_TOKEN"]
-        )
+    precheck_result = PrecheckResult(
+        success=True,
+        disclaimer_context="ctx",
+        disclaimer_tokens=["BLOCKING_TOKEN"]
     )
 
     # Mock DM response: IsBlocking=True
@@ -56,7 +50,7 @@ def test_blocking_disclaimer_blocks_trading(mock_saxo_client, order_intent):
         }]
     }
 
-    outcome = service.evaluate_disclaimers(precheck_outcome, order_intent)
+    outcome = service.evaluate_disclaimers(precheck_result, order_intent)
 
     assert not outcome.allow_trading
     assert len(outcome.blocking_disclaimers) == 1
@@ -67,12 +61,10 @@ def test_normal_disclaimer_blocks_by_default(mock_saxo_client, order_intent):
     config = DisclaimerConfig(policy=DisclaimerPolicy.BLOCK_ALL)
     service = DisclaimerService(mock_saxo_client, config)
 
-    precheck_outcome = PrecheckOutcome(
-        ok=True,
-        pre_trade_disclaimers=PreTradeDisclaimers(
-            disclaimer_context="ctx",
-            disclaimer_tokens=["NORMAL_TOKEN"]
-        )
+    precheck_result = PrecheckResult(
+        success=True,
+        disclaimer_context="ctx",
+        disclaimer_tokens=["NORMAL_TOKEN"]
     )
 
     # Mock DM response: IsBlocking=False
@@ -85,7 +77,7 @@ def test_normal_disclaimer_blocks_by_default(mock_saxo_client, order_intent):
         }]
     }
 
-    outcome = service.evaluate_disclaimers(precheck_outcome, order_intent)
+    outcome = service.evaluate_disclaimers(precheck_result, order_intent)
 
     assert not outcome.allow_trading
     assert len(outcome.normal_disclaimers) == 1
@@ -95,12 +87,10 @@ def test_auto_accept_normal_disclaimers(mock_saxo_client, order_intent):
     config = DisclaimerConfig(policy=DisclaimerPolicy.AUTO_ACCEPT_NORMAL)
     service = DisclaimerService(mock_saxo_client, config)
 
-    precheck_outcome = PrecheckOutcome(
-        ok=True,
-        pre_trade_disclaimers=PreTradeDisclaimers(
-            disclaimer_context="ctx",
-            disclaimer_tokens=["NORMAL_TOKEN"]
-        )
+    precheck_result = PrecheckResult(
+        success=True,
+        disclaimer_context="ctx",
+        disclaimer_tokens=["NORMAL_TOKEN"]
     )
 
     # Mock DM response: IsBlocking=False
@@ -109,11 +99,12 @@ def test_auto_accept_normal_disclaimers(mock_saxo_client, order_intent):
             "DisclaimerToken": "NORMAL_TOKEN",
             "IsBlocking": False,
             "Title": "Normal Warning",
-            "Body": "Info..."
+            "Body": "Info...",
+            "ResponseOptions": [{"Value": "Accepted"}]
         }]
     }
 
-    outcome = service.evaluate_disclaimers(precheck_outcome, order_intent)
+    outcome = service.evaluate_disclaimers(precheck_result, order_intent)
 
     assert outcome.allow_trading
     assert len(outcome.auto_accepted) == 1
@@ -125,12 +116,10 @@ def test_auto_accept_refuses_blocking(mock_saxo_client, order_intent):
     config = DisclaimerConfig(policy=DisclaimerPolicy.AUTO_ACCEPT_NORMAL)
     service = DisclaimerService(mock_saxo_client, config)
 
-    precheck_outcome = PrecheckOutcome(
-        ok=True,
-        pre_trade_disclaimers=PreTradeDisclaimers(
-            disclaimer_context="ctx",
-            disclaimer_tokens=["BLOCKING_TOKEN"]
-        )
+    precheck_result = PrecheckResult(
+        success=True,
+        disclaimer_context="ctx",
+        disclaimer_tokens=["BLOCKING_TOKEN"]
     )
 
     # Mock DM response: IsBlocking=True
@@ -143,7 +132,7 @@ def test_auto_accept_refuses_blocking(mock_saxo_client, order_intent):
         }]
     }
 
-    outcome = service.evaluate_disclaimers(precheck_outcome, order_intent)
+    outcome = service.evaluate_disclaimers(precheck_result, order_intent)
 
     # Should still block
     assert not outcome.allow_trading
