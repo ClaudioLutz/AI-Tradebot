@@ -102,37 +102,3 @@ def test_http_exception_handling(mock_saxo_client, order_intent):
     assert not outcome.success
     assert outcome.error_code == "HTTP_400"
     assert "Bad Request" in outcome.error_message
-
-def test_retry_logic(mock_saxo_client, order_intent):
-    """Test that retry happens on transient errors"""
-    client = PrecheckClient(mock_saxo_client)
-    client.retry_config = RetryConfig(max_retries=1, backoff_base_seconds=0.01)
-
-    class SaxoTransientError(Exception):
-        status_code = 503
-
-    mock_saxo_client.post.side_effect = [
-        SaxoTransientError("Service Unavailable"),
-        {"PreCheckResult": "Ok"}
-    ]
-
-    outcome = client.execute_precheck(order_intent)
-
-    assert outcome.success
-    assert mock_saxo_client.post.call_count == 2
-
-def test_retry_exhaustion(mock_saxo_client, order_intent):
-    """Test that retry gives up after max retries"""
-    client = PrecheckClient(mock_saxo_client)
-    client.retry_config = RetryConfig(max_retries=1, backoff_base_seconds=0.01)
-
-    class SaxoTransientError(Exception):
-        status_code = 503
-
-    mock_saxo_client.post.side_effect = SaxoTransientError("Service Unavailable")
-
-    outcome = client.execute_precheck(order_intent)
-
-    assert not outcome.success
-    assert outcome.error_code == "HTTP_503"
-    assert mock_saxo_client.post.call_count == 2

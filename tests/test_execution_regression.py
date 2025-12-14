@@ -1,12 +1,10 @@
 import pytest
 from decimal import Decimal
-import time
 from unittest.mock import Mock, MagicMock
 from execution.models import OrderIntent, AssetType, BuySell, PrecheckResult, MarketState, OrderType
-from execution.validation import InstrumentValidator, InstrumentConstraints
+from execution.validation import InstrumentConstraints
 from execution.disclaimers import DisclaimerService, DisclaimerDetails, DisclaimerConfig, DisclaimerPolicy
 from execution.placement import OrderPlacementClient
-from execution.utils import RateLimitedSaxoClient
 
 # 1. Decimal Test
 def test_decimal_amount_validation():
@@ -43,6 +41,13 @@ def test_market_state_gating():
     # Closed - Invalid
     c3 = InstrumentConstraints(is_tradable=True, market_state=MarketState.CLOSED)
     assert c3.validate_market_state()[0] is False
+
+    # Pre/Post Market - Invalid (New Logic)
+    c4 = InstrumentConstraints(is_tradable=True, market_state=MarketState.PRE_MARKET)
+    assert c4.validate_market_state()[0] is False
+
+    c5 = InstrumentConstraints(is_tradable=True, market_state=MarketState.POST_MARKET)
+    assert c5.validate_market_state()[0] is False
 
 # 3. Disclaimer Conditions Test
 def test_disclaimer_conditions_prevent_auto_accept():
@@ -91,6 +96,7 @@ def test_placement_reconciliation_url():
     placer = OrderPlacementClient(mock_client)
 
     intent = OrderIntent("client_k", "acc_k", AssetType.STOCK, 1, BuySell.BUY, Decimal(100))
+    intent.external_reference = "ref123"
 
     mock_client.reset_mock()
     mock_client.get.return_value = {"OrderId": "123", "Status": "Placed"}
@@ -99,23 +105,3 @@ def test_placement_reconciliation_url():
 
     mock_client.get.assert_called_with("/port/v1/orders/client_k/123")
     assert outcome.final_status == "success"
-
-# 5. Rate Limiter Wrapper Test
-def test_rate_limiter_wrapper():
-    """Verify rate limiter respects headers"""
-    mock_inner = Mock()
-
-    # Exception simulation for 429
-    error_429 = Exception("429")
-    error_429.status_code = 429
-    error_429.response = Mock(headers={"X-RateLimit-SessionOrders-Reset": "0.1"})
-
-    mock_inner.get.side_effect = [error_429, "Success"]
-
-    client = RateLimitedSaxoClient(mock_inner)
-    client.default_reset_seconds = 0.1
-
-    res = client.get("/test")
-
-    assert res == "Success"
-    assert mock_inner.get.call_count == 2

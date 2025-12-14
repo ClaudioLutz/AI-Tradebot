@@ -13,7 +13,6 @@ from execution.position import PositionManager, PositionAwareGuards, ExecutionCo
 from execution.precheck import PrecheckClient, RetryConfig as PrecheckRetryConfig
 from execution.placement import OrderPlacementClient, PlacementConfig, ExecutionOutcome, PlacementStatus
 from execution.disclaimers import DisclaimerService, DisclaimerConfig, DisclaimerResolutionOutcome
-from execution.utils import RateLimitedSaxoClient
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -51,14 +50,14 @@ class SaxoTradeExecutor(TradeExecutor):
         client_key: str,
         config: Dict[str, Any] = None
     ):
-        # Wrap client with rate limiting logic
-        self.client = RateLimitedSaxoClient(saxo_client)
+        # Use client directly (it handles rate limiting internally)
+        self.client = saxo_client
 
         self.account_key = account_key
         self.client_key = client_key
         self.config = config or {}
         
-        # Initialize components with the WRAPPED client
+        # Initialize components with the client
         self.validator = InstrumentValidator(self.client)
         
         position_config = PositionConfig(

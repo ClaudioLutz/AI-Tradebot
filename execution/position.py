@@ -45,6 +45,9 @@ class ExecutionConfig:
     position_query_retries: int = 2
     position_query_timeout_seconds: int = 10
 
+    # New safety flag
+    block_on_position_failure: bool = True
+
 class PositionManager:
     """Manages position queries and caching"""
 
@@ -54,6 +57,11 @@ class PositionManager:
         self.cache_ttl = cache_ttl_seconds
         self._position_cache: Dict[Tuple[str, int], Position] = {}
         self._cache_timestamp: Optional[datetime] = None
+        self._last_query_failed: bool = False
+
+    @property
+    def last_query_failed(self) -> bool:
+        return self._last_query_failed
 
     def get_positions(self, force_refresh: bool = False) -> Dict[Tuple[str, int], Position]:
         """
@@ -61,6 +69,9 @@ class PositionManager:
         Synchronous wrapper since client is sync.
         """
         if not force_refresh and self._is_cache_valid():
+            # If cache is valid, we consider it a success (not failed recently)
+            # unless we want to track failure of last ATTEMPT specifically.
+            # But cached data is safe to use.
             return self._position_cache
 
         try:
@@ -108,12 +119,14 @@ class PositionManager:
                 f"positions_refreshed count={len(positions)} client_key={self.client_key}"
             )
 
+            self._last_query_failed = False
             return positions
 
         except Exception as e:
             logger.error(
                 f"position_query_failed error={str(e)} client_key={self.client_key}"
             )
+            self._last_query_failed = True
             # Return cached data if available, otherwise empty dict
             return self._position_cache if self._position_cache else {}
 
@@ -141,6 +154,29 @@ class PositionAwareGuards:
         Evaluate if a buy order should be allowed
         """
         positions = self.position_manager.get_positions()
+
+        # Check if query failed and we should block
+        if self.position_manager.last_query_failed and self.config.block_on_position_failure:
+             # If we have valid cached data for THIS key, we might proceed?
+             # But get_positions returns cache if valid. If it failed, it means cache expired or empty.
+             # However, get_positions returns {} on failure if cache empty.
+             # So 'key not in positions' is true.
+             # We must be conservative.
+
+             # If we rely on get_positions returning stale cache, last_query_failed might be True but positions might not be empty.
+             # If cache was valid, it wouldn't attempt query so last_query_failed wouldn't update (remains False or old value).
+             # If cache invalid, it attempts query. If query fails, it sets last_query_failed=True.
+             # Then it returns stale cache if available.
+
+             key = (asset_type, uic)
+             if key not in positions:
+                 logger.warning(f"Blocking buy due to position query failure and no cached position for {uic}")
+                 return PositionGuardResult(
+                    allowed=False,
+                    reason="position_data_unavailable",
+                    position_quantity=None
+                )
+
         key = (asset_type, uic)
 
         if key not in positions:

@@ -155,17 +155,21 @@ class OrderPlacementClient:
         Scan portfolio for order with matching ExternalReference.
         """
         try:
-            # Using Portfolio Orders endpoint with filtering
-            # Note: Saxo API might not support filtering by ExternalReference directly efficiently?
-            # But checking open orders is usually fast.
-            # GET /port/v1/orders/me?FieldGroups=DisplayAndFormat&ClientKey=...
+            # Using Portfolio Orders endpoint.
+            # Attempt to use server-side filtering if supported, otherwise fetch open orders.
+            # We restrict fields to minimize payload.
 
-            # We iterate or filter.
-            # Ideally use $filter if supported.
+            params = {
+                "ClientKey": intent.client_key,
+                "FieldGroups": "DisplayAndFormat",
+                # Optimistic attempt at OData filtering if supported by endpoint variants
+                # If ignored, we still filter client-side below.
+                "$filter": f"ExternalReference eq '{intent.external_reference}'"
+            }
 
             response = self.client.get(
-                "/port/v1/orders",
-                params={"ClientKey": intent.client_key, "FieldGroups": "DisplayAndFormat"}
+                "/port/v1/orders", # Note: Some environments might need /me or /orders/{ClientKey}
+                params=params
             )
 
             data = response.json() if hasattr(response, 'json') else response

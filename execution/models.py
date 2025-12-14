@@ -33,6 +33,8 @@ class MarketState(Enum):
     TRADING_AT_LAST = "TradingAtLast"
     PRE_TRADING = "PreTrading"
     POST_TRADING = "PostTrading"
+    PRE_MARKET = "PreMarket"   # Added alias for story alignment
+    POST_MARKET = "PostMarket" # Added alias for story alignment
     UNKNOWN = "Unknown"
 
 @dataclass

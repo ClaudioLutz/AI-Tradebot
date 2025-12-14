@@ -129,6 +129,8 @@ class InstrumentConstraints:
             MarketState.TRADING_AT_LAST,
             MarketState.PRE_TRADING,
             MarketState.POST_TRADING,
+            MarketState.PRE_MARKET,  # Added
+            MarketState.POST_MARKET, # Added
             MarketState.CLOSED,
             MarketState.UNKNOWN
         }
