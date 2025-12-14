@@ -39,13 +39,14 @@ The following table defines the default market state policy. This table is the *
 |--------------|---------------|-----------|
 | **Open** | ✅ Allow | Normal trading hours, full liquidity |
 | **Closed** | ❌ Block | Market is closed, no trading possible |
-| **Unknown** | ❌ Block | Conservative: block if state cannot be determined |
+| **Unknown** | ❌ Block | Conservative: block if state cannot be determined (Catch-all) |
 | **OpeningAuction** | ❌ Block | Pre-open auction: illiquid, volatile pricing |
 | **ClosingAuction** | ❌ Block | Closing auction: illiquid, volatile pricing |
 | **IntraDayAuction** | ❌ Block | Intraday auction (halt/volatility): illiquid, uncertain execution |
 | **TradingAtLast** | ❌ Block | Trading at last: stale prices, low liquidity |
 | **PreMarket** | ❌ Block (default) | Extended hours: lower liquidity (can be enabled via config) |
 | **PostMarket** | ❌ Block (default) | Extended hours: lower liquidity (can be enabled via config) |
+| **(Any new state)** | ❌ Block | Default safe behavior for newly introduced states |
 
 **Policy Version**: 1.0  
 **Last Updated**: 2025-12-14
@@ -538,6 +539,7 @@ market_state_policy:
 - Unit tests:
   - **Policy Table Compliance**: For each MarketState value Saxo documents, verify allow/block decision matches the Default Policy Table / configured overrides.
   - Ensure coverage includes: `Open`, `Closed`, `Unknown`, `OpeningAuction`, `ClosingAuction`, `IntraDayAuction`, `TradingAtLast`, `PreMarket`, `PostMarket`.
+  - **Test Matrix**: Unit test MUST assert behavior for EVERY enum value in the schema to prevent silent drift.
   - Config override allows selected states (e.g., FxSpot with PreMarket/PostMarket)
   - Missing state defaults to block (unless `allow_on_missing=True`)
   - Asset-type override logic (FxSpot allows PreMarket/PostMarket, Stock blocks them)

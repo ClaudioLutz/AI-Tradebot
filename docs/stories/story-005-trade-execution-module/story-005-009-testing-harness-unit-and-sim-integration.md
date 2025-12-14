@@ -29,8 +29,12 @@ In scope:
    - rate limiting and 429 backoff behavior
    - timeout/TradeNotCompleted reconciliation path
    - disclaimers blocking behavior
-2. Integration tests can run against SIM when credentials are present and are skipped otherwise.
-3. Test harness produces readable logs/artifacts to debug failures (request/response snapshots with redaction).
+2. **Contract Checks** (fail fast on schema drift):
+   - DM disclaimers GET: assert `Data[]` envelope is present.
+   - Precheck/placement: assert `PreTradeDisclaimers` uses `DisclaimerContext` + `DisclaimerTokens`.
+   - Portfolio: assert retrieval supports `{ClientKey}/{OrderId}` and `{ClientKey}` query param.
+3. Integration tests can run against SIM when credentials are present and are skipped otherwise.
+4. Test harness produces readable logs/artifacts to debug failures (request/response snapshots with redaction).
 
 ## Technical Architecture
 

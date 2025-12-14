@@ -24,8 +24,10 @@ In scope:
 1. Executor enforces max 1 order placement per second **per session** (OAuth token): the limiter is scoped per-token (or per AccountKey+token) rather than a single global limiter.
 2. Rate limiter reads and uses `X-RateLimit-*` headers to compute next allowed time (not just `sleep(1.0)`).
 3. On 429, executor backs off and retries up to N times (configurable), and logs rate limit headers when present.
+   - **Rule**: `X-RateLimit-SessionOrders-Reset` is treated as **seconds remaining** (duration), not a timestamp.
 4. On 409 conflict (duplicate operation), executor does not retry automatically and logs an explicit message
    referencing x-request-id / duplicate-window behavior.
+   - **Rule**: The 15-second duplicate window is respected.
 5. On TradeNotCompleted/timeouts for exchange-based products, executor performs reconciliation instead of retrying placement.
 6. All retries include correlation fields (`external_reference`, `request_id`) and do not violate duplicate-operation protections.
 7. Retry invariants are documented and enforced (see Retry Invariants section below).
