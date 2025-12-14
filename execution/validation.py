@@ -3,7 +3,7 @@ from typing import Optional, Dict, List, Tuple
 import time
 import requests
 import logging
-from execution.models import OrderIntent
+from execution.models import OrderIntent, MarketState
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,7 @@ class InstrumentConstraints:
     # Tradability
     is_tradable: bool
     non_tradable_reason: Optional[str] = None
+    market_state: Optional[MarketState] = None
 
     # Amount formatting
     amount_decimals: int = 0  # Precision for amount field
@@ -69,11 +70,19 @@ class InstrumentConstraints:
         Validate amount against constraints.
         Returns: (is_valid, error_message)
         """
+        # Convert Decimal to float for validation if needed,
+        # but amount here is float per type hint.
+        # Wait, OrderIntent.amount is now Decimal.
+        # This method signature should accept Decimal or float.
+        # I'll update signature to accept Any or numbers.Number.
+        # Or cast to float.
+        amount_flt = float(amount)
+
         # Check decimals
         if self.amount_decimals is not None:
             # Count decimal places.
             # We use string formatting to avoid float precision issues with small decimals
-            amount_str = f"{amount:.10f}".rstrip('0').rstrip('.')
+            amount_str = f"{amount_flt:.10f}".rstrip('0').rstrip('.')
             if '.' in amount_str:
                 decimals = len(amount_str.split('.')[1])
                 if decimals > self.amount_decimals:
@@ -82,13 +91,13 @@ class InstrumentConstraints:
         # Check increment size
         if self.increment_size and self.increment_size > 0:
             # Use epsilon for float modulo
-            remainder = amount % self.increment_size
+            remainder = amount_flt % self.increment_size
             # If remainder is close to 0 or close to increment_size, it's valid
             if remainder > 1e-10 and abs(remainder - self.increment_size) > 1e-10:
                 return False, f"Amount {amount} not aligned with increment size {self.increment_size}"
 
         # Check minimum trade size
-        if self.minimum_trade_size and amount < self.minimum_trade_size:
+        if self.minimum_trade_size and amount_flt < self.minimum_trade_size:
             return False, f"Amount {amount} below minimum trade size {self.minimum_trade_size}"
 
         return True, None
@@ -102,6 +111,33 @@ class InstrumentConstraints:
             remainder = price % self.tick_size
             if remainder > 1e-10 and abs(remainder - self.tick_size) > 1e-10:
                 return False, f"Price {price} not aligned with tick size {self.tick_size}"
+        return True, None
+
+    def validate_market_state(self) -> Tuple[bool, Optional[str]]:
+        """
+        Validate if market state allows trading.
+        Block auctions for immediate execution.
+        """
+        if not self.market_state:
+            return True, None # Assume open if unknown
+
+        # Block Auction states
+        blocked_states = {
+            MarketState.OPENING_AUCTION,
+            MarketState.CLOSING_AUCTION,
+            MarketState.INTRADAY_AUCTION,
+            MarketState.TRADING_AT_LAST # Often implies restricted trading
+        }
+
+        # Also Pre/Post trading? Usually implied by Closed or similar.
+        # But if specifically Auction, block it.
+
+        if self.market_state in blocked_states:
+            return False, f"Market is in {self.market_state.value} state, trading restricted."
+
+        if self.market_state == MarketState.CLOSED:
+             return False, "Market is Closed."
+
         return True, None
 
 
@@ -148,14 +184,12 @@ class InstrumentValidator:
 
             # Handling if client returns requests.Response or dict
             if hasattr(response, 'json'):
-                # requests.Response like
                 if hasattr(response, 'raise_for_status'):
                     response.raise_for_status()
                 data = response.json()
             elif isinstance(response, dict):
                 data = response
             else:
-                # Assuming it's already parsed data if not a Response object
                 data = response
 
             # Parse response
@@ -179,10 +213,34 @@ class InstrumentValidator:
         Parse Saxo instrument details response into InstrumentConstraints.
         """
         # Tradability
-        # Saxo response "IsTradable" might be in different places depending on field groups,
-        # but usually at root or in TradingStatus
-        is_tradable = data.get("IsTradable", True)
+        # Check top-level
+        is_tradable = data.get("IsTradable")
         non_tradable_reason = data.get("NonTradableReason")
+
+        # Check nested TradingStatus if top-level is missing
+        if is_tradable is None and "TradingStatus" in data:
+            is_tradable = data["TradingStatus"].get("IsTradable")
+            non_tradable_reason = data["TradingStatus"].get("NonTradableReason")
+
+        # Default to True if still None? Better to be safe and default to False?
+        # Saxo usually provides it. If missing, assume True but log?
+        # Code used to default to True.
+        if is_tradable is None:
+            is_tradable = True
+
+        # Market State
+        market_state_str = None
+        if "TradingStatus" in data:
+            market_state_str = data["TradingStatus"].get("MarketState")
+
+        # Parse MarketState enum
+        market_state = MarketState.UNKNOWN
+        if market_state_str:
+            try:
+                market_state = MarketState(market_state_str)
+            except ValueError:
+                logger.warning(f"Unknown MarketState: {market_state_str}")
+                market_state = MarketState.UNKNOWN
 
         # Format constraints
         format_info = data.get("Format", {})
@@ -216,6 +274,7 @@ class InstrumentValidator:
         return InstrumentConstraints(
             is_tradable=is_tradable,
             non_tradable_reason=non_tradable_reason,
+            market_state=market_state,
             amount_decimals=amount_decimals,
             increment_size=increment_size,
             lot_size=lot_size,
@@ -251,6 +310,11 @@ class InstrumentValidator:
                 reason = constraints.non_tradable_reason or "Unknown reason"
                 return False, f"Instrument not tradable: {reason}"
 
+            # Check market state
+            is_valid, error = constraints.validate_market_state()
+            if not is_valid:
+                return False, error
+
             # Validate order type
             is_valid, error = constraints.validate_order_type(intent.order_type.value)
             if not is_valid:
@@ -269,9 +333,7 @@ class InstrumentValidator:
             if not is_valid:
                 return False, error
 
-            # Validate price (if Limit/Stop and price is present in intent - extending intent dynamically or checking attributes)
-            # Standard OrderIntent might not have price for Market orders.
-            # If we add Limit support later, we'd add 'price' to OrderIntent.
+            # Validate price
             if intent.order_type.value in ["Limit", "Stop"] and hasattr(intent, "price") and intent.price:
                  is_valid, error = constraints.validate_price(intent.price)
                  if not is_valid:

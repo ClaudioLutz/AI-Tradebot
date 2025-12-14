@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, List
 from enum import Enum
+from decimal import Decimal
 
 class AssetType(Enum):
     STOCK = "Stock"
@@ -23,6 +24,17 @@ class OrderDurationType(Enum):
     FILL_OR_KILL = "FillOrKill"
     IMMEDIATE_OR_CANCEL = "ImmediateOrCancel"
 
+class MarketState(Enum):
+    OPEN = "Open"
+    CLOSED = "Closed"
+    OPENING_AUCTION = "OpeningAuction"
+    CLOSING_AUCTION = "ClosingAuction"
+    INTRADAY_AUCTION = "IntraDayAuction"
+    TRADING_AT_LAST = "TradingAtLast"
+    PRE_TRADING = "PreTrading"
+    POST_TRADING = "PostTrading"
+    UNKNOWN = "Unknown"
+
 @dataclass
 class OrderDuration:
     duration_type: OrderDurationType
@@ -39,7 +51,7 @@ class OrderIntent:
     asset_type: AssetType  # Stock, FxSpot, FxCrypto etc.
     uic: int  # Universal Instrument Code
     buy_sell: BuySell  # Buy or Sell
-    amount: float  # Quantity (Shares for Equity, Base Units for FX - NOT Lots)
+    amount: Decimal  # Quantity (Shares for Equity, Base Units for FX - NOT Lots)
     order_type: OrderType = OrderType.MARKET
     order_duration: OrderDuration = field(default_factory=lambda: OrderDuration(OrderDurationType.DAY_ORDER))
     manual_order: bool = False  # False = Automated/Algo, True = Human/GUI
@@ -77,6 +89,7 @@ class PrecheckResult:
 
     # Pre-trade disclaimers (May 2025 requirement)
     disclaimer_tokens: List[str] = field(default_factory=list)
+    disclaimer_context: Optional[str] = None
     has_blocking_disclaimers: bool = False
 
     # Raw response for debugging

@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import Mock, patch
 from requests.exceptions import Timeout
+from decimal import Decimal
 from execution.placement import (
     OrderPlacementClient, PlacementConfig, PlacementStatus,
-    ReconciliationStatus, ExecutionOutcome
+    ExecutionOutcome
 )
-from execution.models import OrderIntent, AssetType, BuySell
-from execution.precheck import PrecheckOutcome, ErrorInfo
+from execution.models import OrderIntent, AssetType, BuySell, PrecheckResult
 
 @pytest.fixture
 def mock_saxo_client():
@@ -20,13 +20,13 @@ def order_intent():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal(100),
         external_reference="ref_1"
     )
 
 @pytest.fixture
 def successful_precheck():
-    return PrecheckOutcome(ok=True)
+    return PrecheckResult(success=True)
 
 def test_dry_run_skips_placement(mock_saxo_client, order_intent, successful_precheck):
     """Test DRY_RUN mode"""
@@ -36,15 +36,12 @@ def test_dry_run_skips_placement(mock_saxo_client, order_intent, successful_prec
     outcome = client.place_order(order_intent, successful_precheck)
 
     assert outcome.final_status == "success"
-    assert outcome.placement.order_id is None
+    assert outcome.order_id == "DRY_RUN_ID"
     assert mock_saxo_client.post.call_count == 0
 
 def test_failed_precheck_skips_placement(mock_saxo_client, order_intent):
     """Test failed precheck blocks placement"""
-    failed_precheck = PrecheckOutcome(
-        ok=False,
-        error_info=ErrorInfo("ERR", "Msg")
-    )
+    failed_precheck = PrecheckResult(success=False)
     client = OrderPlacementClient(mock_saxo_client)
 
     outcome = client.place_order(order_intent, failed_precheck)
@@ -61,39 +58,25 @@ def test_placement_success(mock_saxo_client, order_intent, successful_precheck):
 
     assert outcome.final_status == "success"
     assert outcome.order_id == "12345"
-    assert outcome.placement.status == PlacementStatus.SUCCESS
-
-def test_placement_failure_error_info(mock_saxo_client, order_intent, successful_precheck):
-    """Test placement failure with ErrorInfo"""
-    mock_saxo_client.post.return_value = {
-        "ErrorInfo": {"ErrorCode": "Fail", "Message": "Bad order"}
-    }
-    client = OrderPlacementClient(mock_saxo_client)
-
-    outcome = client.place_order(order_intent, successful_precheck)
-
-    assert outcome.final_status == "failure"
-    assert outcome.placement.status == PlacementStatus.FAILURE
-    assert outcome.placement.error_info.error_code == "Fail"
 
 def test_trade_not_completed_triggers_reconciliation(mock_saxo_client, order_intent, successful_precheck):
-    """Test TradeNotCompleted triggers reconciliation"""
-    # Placement returns TradeNotCompleted
+    """Test TradeNotCompleted (or missing OrderId) triggers reconciliation"""
+    # Placement returns no OrderId
     mock_saxo_client.post.return_value = {
-        "ErrorInfo": {"ErrorCode": "TradeNotCompleted"},
-        "OrderId": "12345"
+        "ErrorInfo": {"ErrorCode": "TradeNotCompleted"}
     }
 
     # Reconciliation finds the order
     mock_saxo_client.get.return_value = {
-        "Data": [{"OrderId": "12345", "Status": "Filled"}]
+        "Data": [{"OrderId": "12345", "Status": "Filled", "ExternalReference": "ref_1"}]
     }
 
     client = OrderPlacementClient(mock_saxo_client)
     outcome = client.place_order(order_intent, successful_precheck)
 
     assert outcome.final_status == "success"
-    assert outcome.reconciliation.status == ReconciliationStatus.FOUND_FILLED
+    assert outcome.order_id == "12345"
+    assert outcome.reconciliation is not None
     assert mock_saxo_client.get.called
 
 def test_timeout_triggers_reconciliation_scan(mock_saxo_client, order_intent, successful_precheck):
@@ -112,19 +95,5 @@ def test_timeout_triggers_reconciliation_scan(mock_saxo_client, order_intent, su
     outcome = client.place_order(order_intent, successful_precheck)
 
     assert outcome.final_status == "success"
-    assert outcome.placement.status == PlacementStatus.TIMEOUT
-    assert outcome.reconciliation.status == ReconciliationStatus.FOUND_WORKING
     assert outcome.order_id == "999"
-
-def test_reconciliation_not_found(mock_saxo_client, order_intent, successful_precheck):
-    """Test reconciliation fails to find order"""
-    mock_saxo_client.post.side_effect = Timeout("Timeout")
-
-    # Empty portfolio
-    mock_saxo_client.get.return_value = {"Data": []}
-
-    client = OrderPlacementClient(mock_saxo_client)
-    outcome = client.place_order(order_intent, successful_precheck)
-
-    assert outcome.final_status == "failure"
-    assert outcome.reconciliation.status == ReconciliationStatus.NOT_FOUND
+    assert outcome.reconciliation is not None

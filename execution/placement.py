@@ -1,578 +1,204 @@
-from dataclasses import dataclass
-from typing import Optional, Literal, Dict
+from dataclasses import dataclass, field
+from typing import Optional, Any
 from datetime import datetime
-from enum import Enum
+import time
 import uuid
 import logging
-import time
-import requests
-from requests.exceptions import Timeout
 
-from execution.models import OrderIntent, OrderDurationType
-from execution.precheck import PrecheckOutcome, ErrorInfo
+from execution.models import OrderIntent, PrecheckResult, ExecutionStatus
+from execution.utils import intent_to_saxo_order_request, generate_request_id
 
 logger = logging.getLogger(__name__)
-
-class PlacementStatus(Enum):
-    SUCCESS = "success"
-    FAILURE = "failure"
-    UNCERTAIN = "uncertain"
-    TIMEOUT = "timeout"
-
-class ReconciliationStatus(Enum):
-    FOUND_WORKING = "found_working"
-    FOUND_FILLED = "found_filled"
-    FOUND_CANCELLED = "found_cancelled"
-    NOT_FOUND = "not_found"
-    QUERY_FAILED = "query_failed"
-    NOT_ATTEMPTED = "not_attempted"
-
-@dataclass
-class PlacementOutcome:
-    """Outcome of order placement attempt"""
-    status: PlacementStatus
-    order_id: Optional[str] = None
-    error_info: Optional[ErrorInfo] = None
-    http_status: Optional[int] = None
-    request_id: Optional[str] = None
-    requires_reconciliation: bool = False
-    raw_response: Optional[dict] = None
-
-@dataclass
-class ReconciliationOutcome:
-    """Outcome of order reconciliation query"""
-    status: ReconciliationStatus
-    order_id: Optional[str] = None
-    order_status: Optional[str] = None  # Working, Filled, Cancelled, etc.
-    fill_price: Optional[float] = None
-    filled_amount: Optional[float] = None
-    error_message: Optional[str] = None
-
-@dataclass
-class ExecutionOutcome:
-    """Final execution outcome combining placement and reconciliation"""
-    placement: PlacementOutcome
-    reconciliation: Optional[ReconciliationOutcome] = None
-    final_status: Literal["success", "failure", "uncertain"] = "uncertain"
-    order_id: Optional[str] = None
-    external_reference: str = ""
-    timestamp: datetime = None
 
 @dataclass
 class PlacementConfig:
     dry_run: bool = False
+    max_retries: int = 0  # Placement usually shouldn't be blindly retried without reconciliation
+    timeout_seconds: float = 10.0
+
+@dataclass
+class ExecutionOutcome:
+    """
+    Result of the placement attempt
+    """
+    final_status: str  # success, failure, uncertain
+    order_id: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    placement: Any = None # Raw placement response wrapper or similar
+    reconciliation: Optional[dict] = None
+
+@dataclass
+class PlacementStatus:
+    # Wrapper for raw response info
+    http_status: int
+    error_info: Optional[Any] = None
+    raw: Optional[dict] = None
 
 class OrderPlacementClient:
-    """HTTP client for Saxo order placement and reconciliation"""
+    """
+    Handles the final step of order placement.
+    """
 
     def __init__(self, saxo_client, config: PlacementConfig = None):
-        self.saxo_client = saxo_client
-        self.logger = logger
+        self.client = saxo_client
         self.config = config or PlacementConfig()
-        self.placement_timeout = 30.0  # seconds
-        self.reconciliation_timeout = 10.0  # seconds
+        self.logger = logger
 
-    def place_order(
-        self,
-        order_intent: OrderIntent,
-        precheck_outcome: PrecheckOutcome
-    ) -> ExecutionOutcome:
+    def place_order(self, intent: OrderIntent, precheck_result: PrecheckResult) -> ExecutionOutcome:
         """
-        Place order in SIM environment after successful precheck.
+        Place the order.
         """
-        return self._place_order_sync(order_intent, precheck_outcome)
-
-    def _place_order_sync(
-        self,
-        order_intent: OrderIntent,
-        precheck_outcome: PrecheckOutcome
-    ) -> ExecutionOutcome:
-
-        # Guard: Never place in DRY_RUN mode
-        if self.config.dry_run:
-            self.logger.info(
-                "DRY_RUN: Skipping actual order placement",
-                extra={
-                    "external_reference": order_intent.external_reference,
-                    "precheck_ok": precheck_outcome.ok
-                }
-            )
-            return ExecutionOutcome(
-                placement=PlacementOutcome(
-                    status=PlacementStatus.SUCCESS,
-                    order_id=None # No OrderId in dry run
-                ),
-                final_status="success",
-                external_reference=order_intent.external_reference,
-                timestamp=datetime.utcnow()
-            )
-
-        # Guard: Precheck must have succeeded
-        if not precheck_outcome.ok:
-            error_code = precheck_outcome.error_info.error_code if precheck_outcome.error_info else "Unknown"
-            self.logger.error(
-                "Cannot place order: precheck failed",
-                extra={
-                    "external_reference": order_intent.external_reference,
-                    "error_code": error_code
-                }
-            )
-            return ExecutionOutcome(
-                placement=PlacementOutcome(
-                    status=PlacementStatus.FAILURE,
-                    error_info=precheck_outcome.error_info
-                ),
+        if not precheck_result.success:
+             return ExecutionOutcome(
                 final_status="failure",
-                external_reference=order_intent.external_reference,
-                timestamp=datetime.utcnow()
+                placement=PlacementStatus(http_status=0, error_info={"Message": "Precheck failed"})
             )
 
-        # Attempt placement
-        request_id = str(uuid.uuid4())
+        request_id = generate_request_id() # Generate new ID for placement
+
+        if self.config.dry_run:
+            self.logger.info(f"DRY RUN: Skipping placement for {intent.external_reference}")
+            return ExecutionOutcome(
+                final_status="success",
+                order_id="DRY_RUN_ID",
+                placement=PlacementStatus(http_status=200, raw={"OrderId": "DRY_RUN_ID"})
+            )
+
+        # Build payload using utility to ensure consistency and Decimal handling
+        payload = intent_to_saxo_order_request(intent)
+
+        # Ensure we pass tokens from precheck if available?
+        # Saxo usually doesn't require passing tokens back in placement,
+        # unless they are specialized tokens not handled by DM.
+        # But DM v2 flow implies we accepted disclaimers separately.
+        # So standard placement payload is enough.
 
         try:
-            payload = self._build_order_payload(order_intent)
-
             self.logger.info(
-                f"Placing order {request_id} in SIM",
-                extra={
-                    "request_id": request_id,
-                    "account_key": order_intent.account_key,
-                    "asset_type": order_intent.asset_type,
-                    "uic": order_intent.uic,
-                    "external_reference": order_intent.external_reference,
-                    "buy_sell": order_intent.buy_sell,
-                    "amount": order_intent.amount,
-                    "manual_order": payload["ManualOrder"]
-                }
+                f"Placing order {intent.external_reference}",
+                extra={"request_id": request_id, "amount": float(intent.amount)}
             )
 
-            # Using synchronous saxo_client.post
-            try:
-                response_data = self.saxo_client.post(
-                    "/trade/v2/orders",
-                    json_body=payload,
-                    headers={"x-request-id": request_id}
-                )
+            # saxo_client.post(url, json_body, headers)
+            response_data = self.client.post(
+                "/trade/v2/orders",
+                json_body=payload,
+                headers={"x-request-id": request_id}
+            )
 
-                # Assume 200/201 if successful, need to handle parsing carefully
-                # We construct a response-like object or pass data directly
-                placement_outcome = self._parse_placement_response_data(
-                    response_data,
-                    200, # Assume 200
-                    request_id,
-                    order_intent
-                )
-            except Exception as e:
-                # Handle exceptions (Timeout, API Error)
-                status_code = getattr(e, "status_code", 500)
+            # Success
+            order_id = response_data.get("OrderId")
+            if not order_id:
+                # Check for potential uncertainty (e.g. TradeNotCompleted)
+                # If no OrderId, we can try to reconcile by ExternalReference
+                return self._reconcile_placement(intent, request_id, error=Exception(f"No OrderId returned: {response_data}"))
 
-                if isinstance(e, Timeout):
-                    self.logger.warning(
-                        "Order placement timeout",
-                        extra={
-                            "request_id": request_id,
-                            "external_reference": order_intent.external_reference,
-                            "timeout_seconds": self.placement_timeout
-                        }
-                    )
-                    placement_outcome = PlacementOutcome(
-                        status=PlacementStatus.TIMEOUT,
-                        request_id=request_id,
-                        requires_reconciliation=True
-                    )
-                else:
-                     self.logger.exception(
-                        "Order placement unexpected error",
-                        extra={
-                            "request_id": request_id,
-                            "external_reference": order_intent.external_reference
-                        }
-                    )
-                     placement_outcome = PlacementOutcome(
-                        status=PlacementStatus.FAILURE,
-                        error_info=ErrorInfo(
-                            error_code="EXCEPTION",
-                            message=str(e)
-                        ),
-                        http_status=status_code,
-                        request_id=request_id
-                    )
+            self.logger.info(f"Order placed successfully: {order_id}")
+            return ExecutionOutcome(
+                final_status="success",
+                order_id=order_id,
+                placement=PlacementStatus(http_status=200, raw=response_data)
+            )
 
         except Exception as e:
-             # Should be caught above, but just in case
-            placement_outcome = PlacementOutcome(
-                status=PlacementStatus.FAILURE,
-                error_info=ErrorInfo(
-                    error_code="EXCEPTION",
-                    message=str(e)
-                ),
-                request_id=request_id
-            )
+            # Handle failure or uncertainty
+            self.logger.error(f"Placement failed/uncertain for {intent.external_reference}: {e}")
 
-        # Handle reconciliation if needed
-        reconciliation = None
-        if placement_outcome.requires_reconciliation:
-            reconciliation = self._reconcile_order(
-                order_intent,
-                placement_outcome
-            )
+            # Check for TradeNotCompleted (Saxo specific logic)
+            # If we got a response with TradeNotCompleted, or a timeout?
+            # If it's a timeout, status is uncertain.
+            # If it's a 4xx, likely failure.
 
-        # Determine final status
-        final_status = self._determine_final_status(
-            placement_outcome,
-            reconciliation
-        )
+            # We assume exception might wrap response or status.
+
+            # If we have an OrderId in the exception/response (rare), or if we simply timed out,
+            # we must reconcile if there's any chance it went through.
+            # But without an OrderId we can only scan by ExternalReference.
+
+            # "TradeNotCompleted" usually comes as a 200 OK with ErrorInfo?
+            # Or 400? Saxo docs say TradeNotCompleted might return OrderId if partial/queued?
+
+            # If we don't have OrderId, we try to find it.
+            return self._reconcile_placement(intent, request_id, error=e)
+
+    def _reconcile_placement(self, intent: OrderIntent, request_id: str, error: Exception) -> ExecutionOutcome:
+        """
+        Attempt to determine order status after a failure/timeout.
+        """
+        # Strategy:
+        # 1. If we have an OrderId (from partial response?), use it.
+        # 2. Scan by ExternalReference.
+
+        # We don't have OrderId from exception usually.
+
+        self.logger.warning("Attempting reconciliation...")
+
+        # Scan by ExternalReference (fallback)
+        found_order = self._scan_by_external_reference(intent)
+
+        if found_order:
+            order_id = found_order.get("OrderId")
+            self.logger.info(f"Reconciliation found order {order_id}")
+            return ExecutionOutcome(
+                final_status="success", # It exists
+                order_id=order_id,
+                reconciliation=found_order
+            )
 
         return ExecutionOutcome(
-            placement=placement_outcome,
-            reconciliation=reconciliation,
-            final_status=final_status,
-            order_id=placement_outcome.order_id if placement_outcome.order_id else (reconciliation.order_id if reconciliation else None),
-            external_reference=order_intent.external_reference,
-            timestamp=datetime.utcnow()
+            final_status="uncertain", # We couldn't confirm it exists or failed
+            placement=PlacementStatus(http_status=500, error_info={"Message": str(error)})
         )
 
-    def _build_order_payload(self, order_intent: OrderIntent) -> dict:
-        """Build Saxo order placement payload"""
-        # Note: DayOrder is strictly required for Market orders
-        return {
-            "AccountKey": order_intent.account_key,
-            "Amount": float(order_intent.amount),
-            "AssetType": order_intent.asset_type.value,
-            "BuySell": order_intent.buy_sell.value,
-            "ManualOrder": order_intent.manual_order,
-            "OrderType": "Market", # order_intent.order_type.value, assuming Market for now per scope
-            "Uic": order_intent.uic,
-            "ExternalReference": order_intent.external_reference,
-            "OrderDuration": {
-                "DurationType": "DayOrder" # Force DayOrder for Market
-            }
-        }
-
-    def _parse_placement_response_data(
-        self,
-        data: dict,
-        http_status: int,
-        request_id: str,
-        order_intent: OrderIntent
-    ) -> PlacementOutcome:
-        """Parse order placement response data"""
-
-        # Check for ErrorInfo in 200 response
-        if "ErrorInfo" in data:
-            error_info = data["ErrorInfo"]
-            error_code = error_info.get("ErrorCode", "UNKNOWN")
-            error_message = error_info.get("Message", "No message")
-
-            # TradeNotCompleted is special - requires reconciliation
-            if error_code == "TradeNotCompleted":
-                order_id = data.get("OrderId")
-
-                self.logger.warning(
-                    "Order placement: TradeNotCompleted",
-                    extra={
-                        "request_id": request_id,
-                        "order_id": order_id,
-                        "external_reference": order_intent.external_reference
-                    }
-                )
-
-                return PlacementOutcome(
-                    status=PlacementStatus.UNCERTAIN,
-                    order_id=order_id,
-                    error_info=ErrorInfo(
-                        error_code=error_code,
-                        message=error_message
-                    ),
-                    http_status=http_status,
-                    request_id=request_id,
-                    requires_reconciliation=True,
-                    raw_response=data
-                )
-
-            # Other errors are definitive failures
-            self.logger.error(
-                "Order placement failed",
-                extra={
-                    "request_id": request_id,
-                    "error_code": error_code,
-                    "error_message": error_message,
-                    "external_reference": order_intent.external_reference
-                }
-            )
-
-            return PlacementOutcome(
-                status=PlacementStatus.FAILURE,
-                error_info=ErrorInfo(
-                    error_code=error_code,
-                    message=error_message
-                ),
-                http_status=http_status,
-                request_id=request_id,
-                raw_response=data
-            )
-
-        # Success path - extract OrderId
-        order_id = data.get("OrderId")
-        if not order_id and "Orders" in data and len(data["Orders"]) > 0:
-            order_id = data["Orders"][0].get("OrderId")
-
-        if not order_id:
-            self.logger.error(
-                "Order placement response missing OrderId",
-                extra={
-                    "request_id": request_id,
-                    "external_reference": order_intent.external_reference,
-                    "response_keys": list(data.keys())
-                }
-            )
-            return PlacementOutcome(
-                status=PlacementStatus.UNCERTAIN,
-                http_status=http_status,
-                request_id=request_id,
-                requires_reconciliation=True,
-                raw_response=data
-            )
-
-        self.logger.info(
-            "Order placed successfully",
-            extra={
-                "request_id": request_id,
-                "order_id": order_id,
-                "external_reference": order_intent.external_reference,
-                "account_key": order_intent.account_key,
-                "uic": order_intent.uic
-            }
-        )
-
-        return PlacementOutcome(
-            status=PlacementStatus.SUCCESS,
-            order_id=order_id,
-            http_status=http_status,
-            request_id=request_id,
-            raw_response=data
-        )
-
-    def _reconcile_order(
-        self,
-        order_intent: OrderIntent,
-        placement_outcome: PlacementOutcome
-    ) -> ReconciliationOutcome:
+    def _scan_by_external_reference(self, intent: OrderIntent) -> Optional[dict]:
         """
-        Reconcile uncertain order placement by querying portfolio.
+        Scan portfolio for order with matching ExternalReference.
         """
-
-        self.logger.info(
-            "Starting order reconciliation",
-            extra={
-                "external_reference": order_intent.external_reference,
-                "order_id": placement_outcome.order_id,
-                "placement_status": placement_outcome.status.value
-            }
-        )
-
         try:
-            # Strategy 1: Query by OrderId if available
-            if placement_outcome.order_id:
-                return self._reconcile_by_order_id(
-                    placement_outcome.order_id,
-                    order_intent.external_reference,
-                    order_intent.client_key
-                )
+            # Using Portfolio Orders endpoint with filtering
+            # Note: Saxo API might not support filtering by ExternalReference directly efficiently?
+            # But checking open orders is usually fast.
+            # GET /port/v1/orders/me?FieldGroups=DisplayAndFormat&ClientKey=...
 
-            # Strategy 2: Scan by ClientKey + ExternalReference
-            return self._reconcile_by_external_reference(
-                order_intent.client_key,
-                order_intent.external_reference
-            )
+            # We iterate or filter.
+            # Ideally use $filter if supported.
 
-        except Exception as e:
-            self.logger.exception(
-                "Reconciliation query failed",
-                extra={
-                    "external_reference": order_intent.external_reference,
-                    "order_id": placement_outcome.order_id
-                }
-            )
-            return ReconciliationOutcome(
-                status=ReconciliationStatus.QUERY_FAILED,
-                error_message=str(e)
-            )
-
-    def _reconcile_by_order_id(
-        self,
-        order_id: str,
-        external_reference: str,
-        client_key: str
-    ) -> ReconciliationOutcome:
-        """Query portfolio orders by OrderId using ClientKey context"""
-
-        try:
-            response_data = self.saxo_client.get(
+            response = self.client.get(
                 "/port/v1/orders",
-                params={"ClientKey": client_key, "OrderId": order_id}
+                params={"ClientKey": intent.client_key, "FieldGroups": "DisplayAndFormat"}
             )
 
-            orders = response_data.get("Data", [])
+            data = response.json() if hasattr(response, 'json') else response
+            orders = data.get("Data", [])
 
-            if not orders:
-                self.logger.warning(
-                    "Reconciliation: OrderId not found in portfolio",
-                    extra={
-                        "order_id": order_id,
-                        "external_reference": external_reference
-                    }
-                )
-                return ReconciliationOutcome(
-                    status=ReconciliationStatus.NOT_FOUND,
-                    order_id=order_id
-                )
-
-            order = orders[0]
-            order_status = order.get("Status", "Unknown")
-
-            # Map Saxo order status to reconciliation status
-            if order_status == "Working":
-                recon_status = ReconciliationStatus.FOUND_WORKING
-            elif order_status in ["Filled", "FillAndStore"]:
-                recon_status = ReconciliationStatus.FOUND_FILLED
-            elif order_status in ["Cancelled", "Rejected"]:
-                recon_status = ReconciliationStatus.FOUND_CANCELLED
-            else:
-                recon_status = ReconciliationStatus.FOUND_WORKING
-
-            self.logger.info(
-                "Reconciliation: Order found",
-                extra={
-                    "order_id": order_id,
-                    "order_status": order_status,
-                    "external_reference": external_reference
-                }
-            )
-
-            return ReconciliationOutcome(
-                status=recon_status,
-                order_id=order_id,
-                order_status=order_status,
-                fill_price=order.get("Price"),
-                filled_amount=order.get("FilledAmount")
-            )
-
-        except Exception as e:
-             # Timeout or API Error
-            self.logger.error(
-                "Reconciliation query failed",
-                extra={
-                    "order_id": order_id,
-                    "external_reference": external_reference,
-                    "error": str(e)
-                }
-            )
-            return ReconciliationOutcome(
-                status=ReconciliationStatus.QUERY_FAILED,
-                order_id=order_id,
-                error_message=str(e)
-            )
-
-    def _reconcile_by_external_reference(
-        self,
-        client_key: str,
-        external_reference: str
-    ) -> ReconciliationOutcome:
-        """
-        Query portfolio orders by ClientKey and search for ExternalReference.
-        """
-
-        try:
-            # Query recent orders for client
-            # Using Status=All to find everything
-            response_data = self.saxo_client.get(
-                "/port/v1/orders",
-                params={"ClientKey": client_key, "Status": "All"}
-            )
-
-            orders = response_data.get("Data", [])
-
-            # Search for matching ExternalReference
             for order in orders:
-                if order.get("ExternalReference") == external_reference:
-                    order_id = order.get("OrderId")
-                    order_status = order.get("Status", "Unknown")
+                if order.get("ExternalReference") == intent.external_reference:
+                    return order
 
-                    self.logger.info(
-                        "Reconciliation: Order found by ExternalReference",
-                        extra={
-                            "order_id": order_id,
-                            "order_status": order_status,
-                            "external_reference": external_reference
-                        }
-                    )
-
-                    if order_status == "Working":
-                        recon_status = ReconciliationStatus.FOUND_WORKING
-                    elif order_status in ["Filled", "FillAndStore"]:
-                        recon_status = ReconciliationStatus.FOUND_FILLED
-                    elif order_status in ["Cancelled", "Rejected"]:
-                        recon_status = ReconciliationStatus.FOUND_CANCELLED
-                    else:
-                        recon_status = ReconciliationStatus.FOUND_WORKING
-
-                    return ReconciliationOutcome(
-                        status=recon_status,
-                        order_id=order_id,
-                        order_status=order_status,
-                        fill_price=order.get("Price"),
-                        filled_amount=order.get("FilledAmount")
-                    )
-
-            # Not found
-            self.logger.warning(
-                "Reconciliation: ExternalReference not found in portfolio",
-                extra={
-                    "client_key": client_key,
-                    "external_reference": external_reference,
-                    "orders_checked": len(orders)
-                }
-            )
-
-            return ReconciliationOutcome(
-                status=ReconciliationStatus.NOT_FOUND
-            )
+            return None
 
         except Exception as e:
-            return ReconciliationOutcome(
-                status=ReconciliationStatus.QUERY_FAILED,
-                error_message=str(e)
-            )
+            self.logger.error(f"Reconciliation scan failed: {e}")
+            return None
 
-    def _determine_final_status(
-        self,
-        placement: PlacementOutcome,
-        reconciliation: Optional[ReconciliationOutcome]
-    ) -> Literal["success", "failure", "uncertain"]:
-        """Determine final execution status from placement and reconciliation"""
+    def _reconcile_by_order_id(self, order_id: str, intent: OrderIntent) -> ExecutionOutcome:
+        """
+        Direct reconciliation if we had an OrderId (not currently used by main flow but kept for completeness).
+        """
+        try:
+            # Direct lookup endpoint: /port/v1/orders/{ClientKey}/{OrderId}
+            url = f"/port/v1/orders/{intent.client_key}/{order_id}"
 
-        # Clear success or failure from placement
-        if placement.status == PlacementStatus.SUCCESS:
-            return "success"
+            response = self.client.get(url)
+            data = response.json() if hasattr(response, 'json') else response
 
-        if placement.status == PlacementStatus.FAILURE:
-            return "failure"
+            if data:
+                 return ExecutionOutcome(
+                    final_status="success",
+                    order_id=order_id,
+                    reconciliation=data
+                )
+        except Exception:
+            pass
 
-        # Uncertain placement - check reconciliation
-        if reconciliation:
-            if reconciliation.status in [
-                ReconciliationStatus.FOUND_WORKING,
-                ReconciliationStatus.FOUND_FILLED
-            ]:
-                return "success"
-
-            if reconciliation.status == ReconciliationStatus.FOUND_CANCELLED:
-                return "failure"
-
-            if reconciliation.status == ReconciliationStatus.NOT_FOUND:
-                return "failure" # Not found means placement didn't happen
-
-        # Unable to determine
-        return "uncertain"
+        return ExecutionOutcome(final_status="uncertain", order_id=order_id)

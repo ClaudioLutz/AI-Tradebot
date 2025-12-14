@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import Mock, patch
+from decimal import Decimal
 from execution.trade_executor import SaxoTradeExecutor
 from execution.models import OrderIntent, AssetType, BuySell, ExecutionStatus, PrecheckResult
-from execution.precheck import PrecheckOutcome, ErrorInfo
 import logging
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def order_intent():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal(100),
         external_reference="ref_1"
     )
 
@@ -36,15 +36,13 @@ def test_execution_dry_run(mock_saxo_client, order_intent):
     with patch("execution.position.PositionManager.get_positions", return_value={}):
         # Mock precheck success
         with patch("execution.precheck.PrecheckClient.execute_precheck",
-                   return_value=PrecheckOutcome(ok=True)):
+                   return_value=PrecheckResult(success=True)):
 
             result = executor.execute(order_intent, dry_run=True)
 
             assert result.status == ExecutionStatus.DRY_RUN
-            assert result.order_id is None
+            assert result.order_id == "DRY_RUN_ID"
             # Verify placement was NOT called (mock client post not called for order)
-            # Precheck was called
-            # Instrument validation was called
 
 def test_execution_success(mock_saxo_client, order_intent):
     """Test successful execution in SIM mode"""
@@ -52,7 +50,7 @@ def test_execution_success(mock_saxo_client, order_intent):
 
     with patch("execution.position.PositionManager.get_positions", return_value={}):
         with patch("execution.precheck.PrecheckClient.execute_precheck",
-                   return_value=PrecheckOutcome(ok=True)):
+                   return_value=PrecheckResult(success=True)):
             # Mock placement response
             mock_saxo_client.post.return_value = {"OrderId": "12345"}
 
@@ -98,7 +96,7 @@ def test_execution_precheck_fail(mock_saxo_client, order_intent):
 
     with patch("execution.position.PositionManager.get_positions", return_value={}):
         with patch("execution.precheck.PrecheckClient.execute_precheck",
-                   return_value=PrecheckOutcome(ok=False, error_info=ErrorInfo("ERR", "Fail"))):
+                   return_value=PrecheckResult(success=False, error_code="ERR", error_message="Fail")):
 
              result = executor.execute(order_intent, dry_run=False)
 
@@ -111,7 +109,7 @@ def test_execution_disclaimer_block(mock_saxo_client, order_intent):
 
     with patch("execution.position.PositionManager.get_positions", return_value={}):
         with patch("execution.precheck.PrecheckClient.execute_precheck",
-                   return_value=PrecheckOutcome(ok=True)):
+                   return_value=PrecheckResult(success=True)):
 
             # Mock disclaimer service blocking
             with patch("execution.disclaimers.DisclaimerService.evaluate_disclaimers") as mock_disc:
@@ -124,5 +122,4 @@ def test_execution_disclaimer_block(mock_saxo_client, order_intent):
                 result = executor.execute(order_intent, dry_run=False)
 
                 assert result.status == ExecutionStatus.BLOCKED_BY_DISCLAIMER
-                # Actually checking result
                 assert "Blocking" in result.error_message
