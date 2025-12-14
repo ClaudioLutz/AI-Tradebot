@@ -481,16 +481,22 @@ grep "market_state_blocking" logs/execution.log | \
 
 **Symptom:**
 ```
-rate_limit_exceeded: status_code=429, reset_at=2024-12-14T09:31:00Z
+rate_limit_exceeded: status_code=429, reset_after_seconds=45
 ```
 
 **Cause:** Exceeded Saxo rate limit (1 order/second per session)
 
+**Understanding Reset Header:**
+- `X-RateLimit-SessionOrders-Reset` is a **duration** (seconds from now)
+- **NOT** an absolute Unix timestamp
+- Example: `Reset: 45` means wait 45 seconds before retrying
+- System computes: `reset_timestamp = now() + 45`
+
 **Solution:**
-- Check if multiple processes are using same session
-- Verify rate limiter is properly initialized
-- Inspect `X-RateLimit-SessionOrders-Remaining` header
-- Wait for reset time before retrying
+- Check if multiple processes are using same session (they share the quota)
+- Verify rate limiter is properly initialized (one per session)
+- Inspect `X-RateLimit-SessionOrders-Remaining` header (should be > 0)
+- Wait for the duration specified in `Reset` header
 
 **Prevention:**
 ```python
@@ -556,31 +562,82 @@ else:
     print("Order not found - safe to retry")
 ```
 
-#### 4. Disclaimer Required
+#### 4. Pre-Trade Disclaimers Present
 
 **Symptom:**
+```json
+{
+  "event": "trading_blocked",
+  "message": "Trading blocked: Blocking disclaimers present",
+  "blocking_tokens": ["DM_REGULATORY_NOTICE_EU"],
+  "external_reference": "strat_aapl_buy_001"
+}
 ```
-precheck_disclaimer_required: disclaimer_ids=['12345'], texts=['You must accept...']
-```
 
-**Cause:** Instrument requires disclaimer acceptance
+**Cause:** Precheck or placement returned `PreTradeDisclaimers` that must be handled
 
-**Solution (Development):**
-1. Log disclaimer text
-2. Manually accept via Saxo platform
-3. Add disclaimer ID to config (if appropriate)
+**Disclaimer Types:**
+- **Blocking** (`IsBlocking: true`): **Cannot** be auto-accepted; requires manual review
+- **Non-blocking** (`IsBlocking: false`): May be auto-accepted based on policy
 
-**Solution (Production):**
-- Pre-accept disclaimers for all instruments in watchlist
-- Block execution if unknown disclaimer encountered
-- Never auto-accept disclaimers
+**Current Fields** (per Saxo DM v2 API):
+- `DisclaimerTokens`: Array of disclaimer token strings
+- `DisclaimerContext`: String (e.g., "OrderPrecheck")
+- `DisclaimerToken`: Individual token (from DM GET response)
+- `IsBlocking`: Boolean flag from DM service
+- `ResponseOptions`: Array of available response types
 
+**Troubleshooting Steps:**
+
+1. **Fetch disclaimer details:**
+   ```bash
+   curl -H "Authorization: Bearer $TOKEN" \
+     "https://gateway.saxobank.com/sim/openapi/dm/v2/disclaimers?DisclaimerTokens=DM_RISK_WARNING_2025_Q1"
+   ```
+   
+   Response envelope (note the `Data[]` array):
+   ```json
+   {
+     "Data": [{
+       "DisclaimerToken": "DM_RISK_WARNING_2025_Q1",
+       "IsBlocking": false,
+       "Title": "Risk Warning",
+       "Body": "Trading in financial instruments...",
+       "ResponseOptions": [{"ResponseType": "Accepted"}]
+     }]
+   }
+   ```
+
+2. **Check blocking status:**
+   - If `IsBlocking: true` → Manual acceptance required (cannot bypass)
+   - If `IsBlocking: false` → Can be auto-accepted (if policy allows)
+
+3. **Solution (Development/Testing):**
+   - Review disclaimer text in logs
+   - Manually accept via Saxo platform or API
+   - Configure policy: `AUTO_ACCEPT_NORMAL` for non-blocking disclaimers
+
+4. **Solution (Production):**
+   - Pre-accept all disclaimers for watchlist instruments before going live
+   - Use `BLOCK_ALL` policy by default (safest)
+   - Never auto-accept blocking disclaimers (enforced in code)
+
+**Configuration:**
 ```python
-# Config approach
-disclaimers:
-  required_disclaimers:
-    - "12345"  # Pre-accepted disclaimer
+# Safe default - block on any disclaimer
+config = DisclaimerConfig(
+    policy=DisclaimerPolicy.BLOCK_ALL
+)
+
+# Production - auto-accept non-blocking only
+config = DisclaimerConfig(
+    policy=DisclaimerPolicy.AUTO_ACCEPT_NORMAL,
+    cache_ttl_seconds=300
+)
 ```
+
+**Invariant:**  
+The system **never** auto-accepts disclaimers where `IsBlocking == true`. This is enforced with defensive checks and CRITICAL-level logging if violated.
 
 #### 5. Position Query Failure
 

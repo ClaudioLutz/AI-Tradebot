@@ -35,11 +35,17 @@ Authorization: Bearer {access_token}
 x-request-id: {uuid}
 ```
 
-**Note on array encoding**: document the chosen encoding in the implementation:
-- Either *repeated params* (recommended for clarity): `...&DisclaimerTokens=t1&DisclaimerTokens=t2`
-- Or *comma-separated* if your HTTP client encodes arrays that way.
+**Query parameter encoding**: Use repeated `DisclaimerTokens=` parameters (one per token):
+```
+GET /dm/v2/disclaimers?DisclaimerTokens=DM_RISK_WARNING_2025_Q1&DisclaimerTokens=DM_REGULATORY_NOTICE_EU
+```
 
-Do **not** use `Token=` or `tokens=` in this endpoint.
+**DEPRECATED patterns** (do not use):
+- ❌ `Token=` (wrong parameter name)
+- ❌ `/dm/v2/disclaimers/responses` (wrong endpoint)
+- ❌ `Accepted: true/false` (wrong request body structure)
+
+**Response envelope**: This endpoint returns a **Data feed structure** (array), not a flat single object. See parsing example below.
 
 #### Register Disclaimer Response
 ```
@@ -89,17 +95,34 @@ Acceptance rules:
 ```
 
 #### Disclaimer Details Response (DM)
+
+**Response envelope**: The endpoint returns a **Data feed** structure:
 ```json
 {
-  "DisclaimerToken": "DM_RISK_WARNING_2025_Q1",
-  "IsBlocking": false,
-  "Title": "Risk Warning",
-  "Body": "Trading in financial instruments involves substantial risk...",
-  "ResponseOptions": [
-    {"ResponseType": "Accepted", "RequiresUserInput": false}
+  "Data": [
+    {
+      "DisclaimerToken": "DM_RISK_WARNING_2025_Q1",
+      "IsBlocking": false,
+      "Title": "Risk Warning",
+      "Body": "Trading in financial instruments involves substantial risk...",
+      "ResponseOptions": [
+        {"ResponseType": "Accepted", "RequiresUserInput": false}
+      ]
+    },
+    {
+      "DisclaimerToken": "DM_REGULATORY_NOTICE_EU",
+      "IsBlocking": true,
+      "Title": "EU Regulatory Notice",
+      "Body": "This instrument is subject to special regulations...",
+      "ResponseOptions": [
+        {"ResponseType": "Accepted", "RequiresUserInput": false}
+      ]
+    }
   ]
 }
 ```
+
+**Note**: The response is wrapped in a `Data` array. Each element represents one disclaimer's details. If you request multiple tokens, you get multiple items in the `Data` array.
 
 #### Disclaimer Response Registration (DM)
 ```json
@@ -437,12 +460,19 @@ class DisclaimerService:
             
             data = response.json()
             
+            # CRITICAL: DM endpoint returns a Data[] feed, not a flat object
+            # Parse the first item from the Data array
+            if "Data" not in data or not data["Data"]:
+                raise Exception(f"No disclaimer data returned for token {token}")
+            
+            disclaimer_item = data["Data"][0]  # Single token query returns one item
+            
             details = DisclaimerDetails(
-                disclaimer_token=data["DisclaimerToken"],
-                is_blocking=bool(data.get("IsBlocking", True)),
-                title=data.get("Title", ""),
-                body=data.get("Body", ""),
-                response_options=list(data.get("ResponseOptions", [])),
+                disclaimer_token=disclaimer_item["DisclaimerToken"],
+                is_blocking=bool(disclaimer_item.get("IsBlocking", True)),
+                title=disclaimer_item.get("Title", ""),
+                body=disclaimer_item.get("Body", ""),
+                response_options=list(disclaimer_item.get("ResponseOptions", [])),
                 retrieved_at=datetime.utcnow()
             )
             

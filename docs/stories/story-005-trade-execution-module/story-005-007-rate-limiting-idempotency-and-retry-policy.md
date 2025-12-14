@@ -118,18 +118,21 @@ class TokenBucketRateLimiter:
         """
         Set explicit wait time based on X-RateLimit-...-Reset header.
 
-        Saxo documents Reset as **seconds until quota reset** (a duration),
-        not an absolute Unix timestamp.
+        CRITICAL: Saxo documents Reset as **seconds until quota reset** (a duration),
+        NOT an absolute Unix timestamp.
+        
+        Per https://www.developer.saxo/openapi/learn/rate-limiting:
+        "Reset: Number of seconds until the quota resets"
 
         Args:
-            reset_after_seconds: seconds until the rate limit resets
+            reset_after_seconds: Seconds until the rate limit resets (duration from now)
         """
         if reset_after_seconds is not None:
             self._wait_until = time.time() + float(reset_after_seconds)
             logger.warning(
                 "rate_limit_reset_scheduled",
                 reset_after_seconds=int(reset_after_seconds),
-                wait_seconds=round(self._wait_until - time.time(), 2)
+                wait_until_computed=round(self._wait_until, 2)
             )
 ```
 
@@ -733,12 +736,17 @@ Retry safety note:
 - Preferred strategy: reconcile first; only retry when you have high confidence the original did not succeed.
 
 ### Rate Limiting Behavior
-Per Saxo documentation:
+Per Saxo documentation (https://www.developer.saxo/openapi/learn/rate-limiting):
 - Limit is **per session** (OAuth token), not per process
 - Multiple processes sharing same token share the limit
 - Headers provide real-time limit status
-- 429 responses include `X-RateLimit-SessionOrders-Reset` as **seconds until reset**
-- Respect that duration rather than treating it as an epoch timestamp
+- 429 responses include `X-RateLimit-SessionOrders-Reset` header
+  
+**CRITICAL - Reset Header Semantics**:
+- `X-RateLimit-SessionOrders-Reset` is a **duration** (seconds from now until reset)
+- NOT a Unix epoch timestamp
+- Example: If `Reset: 45`, wait 45 seconds before retrying
+- Compute the actual timestamp internally: `reset_timestamp = now() + reset_seconds`
 
 ## Primary Sources
 - https://www.developer.saxo/openapi/learn/rate-limiting

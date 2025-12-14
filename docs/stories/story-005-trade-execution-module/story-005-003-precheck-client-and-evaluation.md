@@ -327,8 +327,13 @@ class PrecheckClient:
                 amount=Decimal(str(data["MarginImpactBuySell"]["Amount"])),
                 currency=data["MarginImpactBuySell"]["Currency"]
             )
-        # Defensive fallback for older/alternate shapes
+        # LEGACY FALLBACK (should not occur with FieldGroups=["MarginImpactBuySell"])
+        # This is retained only for robustness if older API versions are encountered
         elif "MarginImpact" in data:
+            self.logger.debug(
+                "Parsing legacy MarginImpact field (expected MarginImpactBuySell)",
+                extra={"request_id": request_id}
+            )
             margin_impact_buy_sell = MarginImpactBuySell(
                 amount=Decimal(str(data["MarginImpact"]["Amount"])),
                 currency=data["MarginImpact"]["Currency"]
@@ -515,12 +520,13 @@ Notes:
 - Treat unknown/extra fields as ignorable.
 
 ### FieldGroups Specification
-Per Saxo precheck API documentation, use:
+Per Saxo precheck API documentation, **always use**:
 - `"Costs"`: returns estimated cost fields
-- `"MarginImpactBuySell"`: returns margin impact fields
+- `"MarginImpactBuySell"`: returns margin impact fields (current standard)
 
-Defensive parsing:
-- If Saxo returns legacy/alternate `MarginImpact`, parse it as `margin_impact_buy_sell` (fallback) and log at DEBUG.
+**Do not use** `"MarginImpact"` - this is a legacy field name. The implementation includes a defensive fallback for backwards compatibility only.
+
+**Defensive parsing note**: If Saxo returns legacy `MarginImpact`, the code will parse it as `margin_impact_buy_sell` (with DEBUG logging), but this should not occur when using the recommended FieldGroups.
 
 ## Primary Sources
 - https://www.developer.saxo/openapi/referencedocs/trade/v2/orders/post__trade__precheck
