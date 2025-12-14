@@ -81,15 +81,14 @@ x-request-id: {uuid}
 {
   "PreCheckResult": "Ok",
   "PreTradeDisclaimers": {
-    "Disclaimers": [
-      {
-        "Token": "DM_12345",
-        "Type": "Normal"
-      },
-      {
-        "Token": "DM_67890",
-        "Type": "Blocking"
-      }
+    "DisclaimerContext": {
+      "ContextType": "OrderPrecheck",
+      "AccountKey": "Gv1B3n...",
+      "Uic": 211
+    },
+    "DisclaimerTokens": [
+      "DM_RISK_WARNING_2025_Q1",
+      "DM_REGULATORY_NOTICE_EU"
     ]
   }
 }
@@ -119,9 +118,17 @@ class MarginImpact:
     currency: str
 
 @dataclass
-class DisclaimerToken:
-    token: str
-    type: str  # "Normal" or "Blocking"
+class DisclaimerContext:
+    """Context information for disclaimers"""
+    context_type: str  # "OrderPrecheck", "OrderPlacement", etc.
+    account_key: str
+    uic: int
+    
+@dataclass
+class PreTradeDisclaimers:
+    """Pre-trade disclaimer data from precheck response"""
+    disclaimer_context: DisclaimerContext
+    disclaimer_tokens: List[str]  # List of disclaimer token strings
 
 @dataclass
 class PrecheckOutcome:
@@ -129,7 +136,7 @@ class PrecheckOutcome:
     error_info: Optional[ErrorInfo] = None
     estimated_cost: Optional[EstimatedCost] = None
     margin_impact: Optional[MarginImpact] = None
-    pre_trade_disclaimers: Optional[List[DisclaimerToken]] = None
+    pre_trade_disclaimers: Optional[PreTradeDisclaimers] = None
     http_status: int = 200
     request_id: Optional[str] = None
     raw_response: Optional[dict] = None  # For debugging
@@ -241,7 +248,7 @@ class PrecheckClient:
             "OrderDuration": {
                 "DurationType": "DayOrder"
             },
-            "FieldGroups": ["Costs", "MarginImpact"]
+            "FieldGroups": ["Costs", "MarginImpactBuySell"]
         }
     
     def _parse_precheck_response(
@@ -334,13 +341,16 @@ class PrecheckClient:
         
         disclaimers = None
         if "PreTradeDisclaimers" in data:
-            disclaimers = [
-                DisclaimerToken(
-                    token=d["Token"],
-                    type=d["Type"]
-                )
-                for d in data["PreTradeDisclaimers"].get("Disclaimers", [])
-            ]
+            ptd = data["PreTradeDisclaimers"]
+            context = DisclaimerContext(
+                context_type=ptd.get("DisclaimerContext", {}).get("ContextType", "OrderPrecheck"),
+                account_key=ptd.get("DisclaimerContext", {}).get("AccountKey", order_intent.account_key),
+                uic=ptd.get("DisclaimerContext", {}).get("Uic", order_intent.uic)
+            )
+            disclaimers = PreTradeDisclaimers(
+                disclaimer_context=context,
+                disclaimer_tokens=ptd.get("DisclaimerTokens", [])
+            )
         
         # Success!
         self.logger.info(
@@ -502,7 +512,23 @@ async def execute_precheck_with_retry(
 - Assumes OAuth token is valid and refreshed as needed.
 - Assumes network connectivity to Saxo SIM environment.
 
+## Critical Schema Notes
+
+### PreTradeDisclaimers Structure
+Per Saxo's breaking-change documentation, the precheck response contains:
+- `DisclaimerContext`: Object with context information (ContextType, AccountKey, Uic)
+- `DisclaimerTokens`: Array of strings (not objects with Type field)
+- Classification into "Normal" vs "Blocking" comes from fetching DM disclaimer details (Story 005-005), NOT from the precheck payload
+- Do NOT assume a "Type" field exists in the precheck response
+
+### FieldGroups Specification
+Per Saxo precheck API documentation, use:
+- `"Costs"`: Returns estimated cost fields
+- `"MarginImpactBuySell"`: Returns margin impact (NOT "MarginImpact")
+- Verify actual field names against primary source docs to prevent "passes in DRY_RUN but fails in SIM" issues
+
 ## Primary Sources
 - https://www.developer.saxo/openapi/referencedocs/trade/v2/orders/post__trade__precheck
 - https://www.developer.saxo/openapi/learn/breaking-change-pre-trade-disclaimers-on-openapi
+- https://www.developer.saxo/openapi/learn/pre-trade-disclaimers
 - https://www.developer.saxo/openapi/learn/error-handling

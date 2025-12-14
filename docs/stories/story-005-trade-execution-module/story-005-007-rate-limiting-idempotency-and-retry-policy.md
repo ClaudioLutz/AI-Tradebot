@@ -21,12 +21,14 @@ In scope:
 - Ensure the orchestrator loop never crashes on HTTP exceptions.
 
 ## Acceptance Criteria
-1. Executor enforces max 1 order placement per second per session (local limiter).
-2. On 429, executor backs off and retries up to N times (configurable), and logs rate limit headers when present.
-3. On 409 conflict (duplicate operation), executor does not retry automatically and logs an explicit message
+1. Executor enforces max 1 order placement per second per session (local limiter is global/process-wide).
+2. Rate limiter reads and uses `X-RateLimit-*` headers to compute next allowed time (not just `sleep(1.0)`).
+3. On 429, executor backs off and retries up to N times (configurable), and logs rate limit headers when present.
+4. On 409 conflict (duplicate operation), executor does not retry automatically and logs an explicit message
    referencing x-request-id / duplicate-window behavior.
-4. On TradeNotCompleted/timeouts for exchange-based products, executor performs reconciliation instead of retrying placement.
-5. All retries include correlation fields (`external_reference`, `request_id`) and do not violate duplicate-operation protections.
+5. On TradeNotCompleted/timeouts for exchange-based products, executor performs reconciliation instead of retrying placement.
+6. All retries include correlation fields (`external_reference`, `request_id`) and do not violate duplicate-operation protections.
+7. Retry invariants are documented and enforced (see Retry Invariants section below).
 
 ## Technical Architecture
 
@@ -428,7 +430,7 @@ class RequestIdManager:
         """
         Generate unique request ID
         
-        Format: {external_reference}_{operation}_{uuid}
+        Format: {external_reference}_{operation}_{timestamp_ms}_{uuid}
         
         Args:
             external_reference: Order external reference
@@ -451,21 +453,127 @@ class RequestIdManager:
         
         Recommendation: Generate NEW request_id on retry to avoid
         409 Conflict if the original request partially succeeded
+        
+        Saxo's duplicate detection is based on:
+        - Same URL + same request body + same x-request-id
+        - Within 15-second window
+        
+        Changing request_id allows retry to proceed even if first attempt
+        is still in-flight or uncertain.
         """
         # Always use new request_id on retry
         return True
+```
+
+### Retry Invariants
+
+To ensure safe retry behavior and prevent accidental duplicate orders, the following invariants must be maintained:
+
+#### Invariant 1: Stable External Reference
+**Rule**: On retry after timeout/unknown outcome, **reuse the same `external_reference`**  
+**Rationale**: Reconciliation queries need a stable correlation ID to find existing orders  
+**Implementation**: `external_reference` is generated once per `OrderIntent` and never changes
+
+```python
+# CORRECT - external_reference stays constant
+intent = OrderIntent(external_reference="E005_BUY_AAPL_001", ...)
+attempt_1 = await execute(intent)  # timeout
+attempt_2 = await execute(intent)  # retry with same external_reference
+```
+
+#### Invariant 2: Fresh Request ID on Retry
+**Rule**: On retry, **generate NEW `x-request-id`** unless explicitly duplicating  
+**Rationale**: Saxo's 15-second duplicate window uses `(URL + body + x-request-id)`. Changing request_id allows retry even if first attempt is in-flight  
+**Implementation**: Generate new request_id for each placement attempt
+
+```python
+# CORRECT - new request_id per attempt
+attempt_1: x-request-id = "E005_BUY_AAPL_001_place_1702541234567_a1b2"
+attempt_2: x-request-id = "E005_BUY_AAPL_001_place_1702541245890_c3d4"  # NEW
+```
+
+#### Invariant 3: Persist Intent State
+**Rule**: Persist `{external_reference → last_attempt_state}` even if lightweight  
+**Rationale**: Prevents restarts from re-issuing same intent without reconciliation  
+**Implementation**: Lightweight local store (SQLite, JSON file, or in-memory with checkpoint)
+
+```python
+class IntentTracker:
+    """Tracks order intent state across retries and restarts"""
+    
+    def __init__(self, storage_path: str):
+        self.storage = {}  # In-memory, persisted to disk
+        
+    def record_attempt(
+        self,
+        external_reference: str,
+        status: str,  # "pending", "timeout", "confirmed"
+        order_id: Optional[str] = None
+    ):
+        self.storage[external_reference] = {
+            "status": status,
+            "order_id": order_id,
+            "last_attempt": time.time()
+        }
+        self._persist()
+        
+    def should_retry(self, external_reference: str) -> bool:
+        """Check if retry is safe"""
+        state = self.storage.get(external_reference)
+        if not state:
+            return True  # First attempt
+        
+        if state["status"] == "confirmed":
+            return False  # Already placed
+        
+        if state["status"] == "timeout":
+            # Must reconcile first
+            return False
+        
+        return True
+```
+
+#### Invariant 4: Reconcile Before Retry
+**Rule**: After timeout/TradeNotCompleted, **reconcile before retrying placement**  
+**Rationale**: Order may have been placed despite timeout; avoid duplicate  
+**Implementation**: Query portfolio orders by external_reference
+
+```python
+async def safe_retry_after_timeout(intent: OrderIntent):
+    """Safe retry pattern after timeout"""
+    
+    # Step 1: Check if order exists
+    existing_orders = await portfolio.query_orders(
+        external_reference=intent.external_reference
+    )
+    
+    if existing_orders:
+        # Order was placed despite timeout
+        logger.info(
+            "order_found_in_reconciliation",
+            external_reference=intent.external_reference,
+            order_id=existing_orders[0]["OrderId"]
+        )
+        return existing_orders[0]
+    
+    # Step 2: Safe to retry with NEW request_id
+    logger.info(
+        "safe_to_retry_after_reconciliation",
+        external_reference=intent.external_reference
+    )
+    return await place_order(intent)
 ```
 
 ### Integration Example
 
 ```python
 class OrderExecutor:
-    """Example integration of rate limiting and retry"""
+    """Example integration of rate limiting and retry with invariants"""
     
     def __init__(self, client: SaxoClient):
         self.client = client
         
-        # Initialize rate limiter
+        # Initialize rate limiter (global singleton)
         rate_config = RateLimitConfig(orders_per_second=1.0)
         self.rate_limiter = TokenBucketRateLimiter(rate_config)
         
@@ -477,10 +585,27 @@ class OrderExecutor:
         )
         self.retry_policy = RetryPolicy(retry_config, self.rate_limiter)
         
+        # Initialize intent tracker
+        self.intent_tracker = IntentTracker("data/intent_state.json")
+        
     async def place_order(self, order_intent: OrderIntent) -> OrderResult:
-        """Place order with rate limiting and retry"""
+        """Place order with rate limiting, retry, and invariants"""
         
         external_ref = order_intent.external_reference
+        
+        # Check if safe to retry (Invariant 3)
+        if not self.intent_tracker.should_retry(external_ref):
+            existing_state = self.intent_tracker.get_state(external_ref)
+            if existing_state["status"] == "timeout":
+                # Must reconcile first (Invariant 4)
+                return await self.reconcile_and_retry(order_intent)
+            else:
+                raise Exception(f"Order {external_ref} already processed")
+        
+        # Record attempt
+        self.intent_tracker.record_attempt(external_ref, "pending")
+        
+        # Generate NEW request_id for this attempt (Invariant 2)
         request_id = RequestIdManager.generate_request_id(external_ref, "place")
         
         async def _place_operation():
@@ -488,7 +613,7 @@ class OrderExecutor:
                 "/trade/v2/orders",
                 json=order_intent.to_dict(),
                 headers={
-                    "X-Request-ID": request_id
+                    "X-Request-ID": request_id  # Fresh for each attempt
                 }
             )
         
@@ -496,10 +621,16 @@ class OrderExecutor:
             response = await self.retry_policy.execute_with_retry(
                 operation=_place_operation,
                 operation_name="place_order",
-                external_reference=external_ref
+                external_reference=external_ref  # Stable (Invariant 1)
             )
             
-            return OrderResult.from_response(response)
+            result = OrderResult.from_response(response)
+            self.intent_tracker.record_attempt(
+                external_ref,
+                "confirmed",
+                result.order_id
+            )
+            return result
             
         except Exception as e:
             # Log final failure
@@ -509,22 +640,62 @@ class OrderExecutor:
                 request_id=request_id,
                 error=str(e)
             )
+            
+            # Record timeout for reconciliation
+            if "timeout" in str(e).lower():
+                self.intent_tracker.record_attempt(external_ref, "timeout")
+            
             raise
+    
+    async def reconcile_and_retry(self, intent: OrderIntent) -> OrderResult:
+        """Reconcile before retry (Invariant 4)"""
+        
+        logger.info(
+            "reconciling_before_retry",
+            external_reference=intent.external_reference
+        )
+        
+        # Query existing orders
+        orders = await self.portfolio.query_orders(
+            external_reference=intent.external_reference
+        )
+        
+        if orders:
+            # Found existing order
+            logger.info(
+                "order_found_skipping_retry",
+                external_reference=intent.external_reference,
+                order_id=orders[0]["OrderId"]
+            )
+            self.intent_tracker.record_attempt(
+                intent.external_reference,
+                "confirmed",
+                orders[0]["OrderId"]
+            )
+            return OrderResult.from_portfolio_order(orders[0])
+        
+        # No order found - safe to retry
+        logger.info(
+            "no_order_found_retrying",
+            external_reference=intent.external_reference
+        )
+        
+        # Clear timeout state and retry
+        self.intent_tracker.clear_state(intent.external_reference)
+        return await self.place_order(intent)
 ```
 
 ## Implementation Notes
-- Use a token-bucket or simple "sleep until next slot" approach for 1 order/sec; keep it deterministic.
-- Parse rate limit headers if present:
-  - X-RateLimit-SessionOrders-Limit / Remaining / Reset
-  - X-RateLimit-SessionRequests-* (as applicable)
-- Keep retry budget low (e.g., 2–3 retries) to avoid cascading actions in fast loops.
-- Ensure request_id changes between separate intentional order operations; for "retry same operation" you must decide whether to reuse or change.
-  - Default: do NOT re-try order placement; reconcile.
+- **Rate Limiter Scope**: Use a singleton rate limiter per process to enforce global 1 order/sec limit across all strategies/accounts
+- **Header-Driven Throttling**: Parse rate limit headers (`X-RateLimit-SessionOrders-*`) and use them to compute next allowed time, not just `sleep(1.0)`
 - **Token Bucket**: Provides smooth rate limiting with deterministic behavior for testing
 - **Jitter**: Prevents thundering herd when multiple operations retry simultaneously
 - **Request ID Strategy**: Generate new request_id on each retry to avoid 409 Conflict
+- **Retry Invariants**: Enforce the four invariants (stable external_reference, fresh request_id, persist state, reconcile before retry)
 - **Conservative Defaults**: Most errors don't auto-retry; prefer reconciliation over duplicate risk
 - **Correlation**: Include `external_reference` in all log events for end-to-end tracing
+- **Persistence**: Implement lightweight intent state tracking (SQLite/JSON) so restarts don't re-issue without reconciliation
+- Keep retry budget low (e.g., 2–3 retries) to avoid cascading actions in fast loops
 
 ## Test Plan
 - Unit tests:
@@ -537,6 +708,27 @@ class OrderExecutor:
 - Depends on Story 005-004 reconciliation mechanics and Story 005-001 request_id header.
 - Requires a clock abstraction or injectable sleep for deterministic tests.
 
+## Critical Correctness Notes
+
+### Saxo Duplicate Detection Mechanics
+Saxo detects duplicate operations based on:
+1. **Same URL** (endpoint path)
+2. **Same request body** (all fields including external_reference)
+3. **Same x-request-id** header
+4. **Within 15-second rolling window**
+
+**Implication**: Changing external_reference OR x-request-id allows retry to proceed. For safe retry after timeout, keep external_reference constant (for reconciliation) but change x-request-id (to bypass duplicate detection).
+
+### Rate Limiting Behavior
+Per Saxo documentation:
+- Limit is **per session** (OAuth token), not per process
+- Multiple processes sharing same token share the limit
+- Headers provide real-time limit status
+- 429 responses include `X-RateLimit-SessionOrders-Reset` timestamp
+- Respect reset time rather than fixed backoff
+
 ## Primary Sources
 - https://www.developer.saxo/openapi/learn/rate-limiting
 - https://www.developer.saxo/openapi/learn/order-placement
+- https://developer.saxobank.com/openapi/learn/rate-limiting (additional rate limit guidance)
+- https://openapi.help.saxo/hc/en-us/articles/4418504615057-How-do-I-label-orders-with-a-client-defined-order-ID (external reference usage)

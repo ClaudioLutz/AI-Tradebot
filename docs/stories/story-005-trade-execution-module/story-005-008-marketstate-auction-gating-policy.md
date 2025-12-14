@@ -22,13 +22,40 @@ In scope:
 - Integrate gate before precheck (so you don't precheck trades you will not place).
 
 ## Acceptance Criteria
-1. Default behavior blocks execution during auction and TradingAtLast states.
+1. Default behavior blocks execution during auction and TradingAtLast states per the Default Policy Table.
 2. Gate is evaluated before precheck/placement and returns a structured "blocked_by_market_state" result.
 3. Gate is configurable (e.g., allow PreMarket/PostMarket) without code change.
 4. All blocked events are logged with `{asset_type, uic, market_state, policy_version, external_reference}`.
 5. If market state is missing/unknown, behavior is conservative (block) unless explicitly configured otherwise.
+6. Implementation matches the Default Policy Table exactly (reviewers can test against table).
 
 ## Technical Architecture
+
+### Default Policy Table
+
+The following table defines the default market state policy. This table is the **single source of truth** for reviewers and testers:
+
+| Market State | Allow Trading | Rationale |
+|--------------|---------------|-----------|
+| **Open** | ✅ Allow | Normal trading hours, full liquidity |
+| **Closed** | ❌ Block | Market is closed, no trading possible |
+| **Unknown** | ❌ Block | Conservative: block if state cannot be determined |
+| **OpeningAuction** | ❌ Block | Pre-open auction: illiquid, volatile pricing |
+| **ClosingAuction** | ❌ Block | Closing auction: illiquid, volatile pricing |
+| **IntraDayAuction** | ❌ Block | Intraday auction (halt/volatility): illiquid, uncertain execution |
+| **TradingAtLast** | ❌ Block | Trading at last: stale prices, low liquidity |
+| **PreMarket** | ❌ Block (default) | Extended hours: lower liquidity (can be enabled via config) |
+| **PostMarket** | ❌ Block (default) | Extended hours: lower liquidity (can be enabled via config) |
+
+**Policy Version**: 1.0  
+**Last Updated**: 2025-12-14
+
+#### Asset-Type-Specific Overrides (Optional)
+
+| Asset Type | Allowed States | Rationale |
+|------------|----------------|-----------|
+| **FxSpot** | Open, PreMarket, PostMarket | 24-hour market, extended hours are normal |
+| **Stock** (default) | Open only | Equity market hours, auction protection |
 
 ### Market State Enumeration
 
@@ -492,29 +519,65 @@ market_state_policy:
 ```
 
 ## Implementation Notes
-- Keep gating independent from strategy logic: strategies emit signals; executor decides whether trading is allowed *now*.
-- Centralize the policy in one module so future epics (risk, live) can reuse it.
+- **Single Source of Truth**: The Default Policy Table above is the authoritative reference; code must match it exactly
+- **Testable Policy**: Reviewers can verify implementation by testing each market state against the table
+- **Version Control**: Policy table includes version number for audit trail and evolution tracking
+- Keep gating independent from strategy logic: strategies emit signals; executor decides whether trading is allowed *now*
+- Centralize the policy in one module so future epics (risk, live) can reuse it
 - Add "why" metadata in logs so a human can distinguish:
   - "AuctionStateBlocked" vs "Closed" vs "Unknown"
 - **Performance**: Market state gate should be very fast (use cached data)
 - **Fallback Chain**: Try multiple sources (quote → position → instrument) for robustness
 - **Conservative Default**: Block on unknown/missing state to prevent execution in uncertain conditions
 - **Audit Trail**: Log all blocked executions with full context for post-trade analysis
-- **FX Consideration**: 24-hour FX markets may not have traditional "Closed" state
+- **FX Consideration**: 24-hour FX markets may not have traditional "Closed" state; use asset-type overrides
 
 ## Test Plan
 - Unit tests:
-  - Each MarketState value maps to allow/block correctly under default config.
-  - Config override allows selected states.
-  - Missing state defaults to block.
+  - **Policy Table Compliance**: For each market state in the Default Policy Table, verify allow/block decision matches table exactly
+  - Test cases for all 9 market states: Open (allow), Closed/Unknown/OpeningAuction/ClosingAuction/IntraDayAuction/TradingAtLast/PreMarket/PostMarket (all block)
+  - Config override allows selected states (e.g., FxSpot with PreMarket/PostMarket)
+  - Missing state defaults to block (unless `allow_on_missing=True`)
+  - Asset-type override logic (FxSpot allows PreMarket/PostMarket, Stock blocks them)
 - Integration (SIM):
-  - If market data provides MarketState, verify gate respects it (log-only check is sufficient if auction states are hard to reproduce).
+  - If market data provides MarketState, verify gate respects it (log-only check is sufficient if auction states are hard to reproduce)
+  - During market open: verify Open state allows trading
+  - Before market open: verify gate blocks with appropriate reason
+  - After market close: verify gate blocks with appropriate reason
+
+### Test Coverage Matrix
+
+| Market State | Expected Result | Test Method |
+|--------------|-----------------|-------------|
+| Open | Allow | Mock quote with MarketState="Open" |
+| Closed | Block | Mock quote with MarketState="Closed" |
+| Unknown | Block | Mock quote with MarketState="Unknown" |
+| OpeningAuction | Block | Mock quote with MarketState="OpeningAuction" |
+| ClosingAuction | Block | Mock quote with MarketState="ClosingAuction" |
+| IntraDayAuction | Block | Mock quote with MarketState="IntraDayAuction" |
+| TradingAtLast | Block | Mock quote with MarketState="TradingAtLast" |
+| PreMarket (Stock) | Block | Mock quote, asset_type="Stock" |
+| PreMarket (FxSpot) | Allow (with override) | Mock quote, asset_type="FxSpot", override config |
+| PostMarket (Stock) | Block | Mock quote, asset_type="Stock" |
+| PostMarket (FxSpot) | Allow (with override) | Mock quote, asset_type="FxSpot", override config |
+| Missing/None | Block | Mock quote with no MarketState field |
 
 ## Dependencies / Assumptions
 - Depends on a market-state signal from market data (Epic 003/004) OR a portfolio-derived fallback.
 - This policy should remain stable across Epic 004 and Epic 005; document it clearly for developers.
 
+## Alignment with Epic 004
+
+This market state policy is consistent with Epic 004's data quality gating concepts:
+- Epic 004 (Strategy): Evaluates data quality and market conditions for signal generation
+- Epic 005 (Execution): Enforces market state policy as a hard gate before order placement
+
+**Consistency Check**:
+- If Epic 004 allows signal generation during PreMarket, but Epic 005 blocks PreMarket execution (default), the order will be blocked with clear logging
+- Asset-type overrides ensure both epics can be configured consistently for 24-hour markets (FX)
+
 ## Primary Sources
 - https://www.developer.saxo/openapi/referencedocs/trade/v1/prices/post__trade__multileg/schema-marketstate
 - https://www.developer.saxo/openapi/referencedocs/ref/v1/instruments/get__ref__details/schema-instrumentsessionstate
 - https://www.developer.saxo/openapi/referencedocs/trade/v1/infoprices/get__trade/schema-quote
+- https://www.developer.saxo/openapi/learn/reference-data (general market state documentation)
