@@ -72,6 +72,7 @@ def _float_env(name: str, default: float) -> float:
 
 MIN_QUOTES_POLL_SECONDS = _float_env("SAXO_MIN_QUOTES_POLL_SECONDS", 5.0)
 MIN_BARS_POLL_SECONDS = _float_env("SAXO_MIN_BARS_POLL_SECONDS", 10.0)
+MIN_ORDERS_POLL_SECONDS = _float_env("SAXO_MIN_ORDERS_POLL_SECONDS", 1.0)
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -292,6 +293,7 @@ class SaxoClient:
         min_intervals = {
             "quotes": MIN_QUOTES_POLL_SECONDS,
             "bars": MIN_BARS_POLL_SECONDS,
+            "orders": MIN_ORDERS_POLL_SECONDS,
             "default": 1.0
         }
         
@@ -472,7 +474,8 @@ class SaxoClient:
         path: str,
         json_body: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None
+        headers: Optional[Dict[str, str]] = None,
+        endpoint_type: str = "default"
     ) -> Dict[str, Any]:
         """
         Make POST request to Saxo API.
@@ -482,6 +485,7 @@ class SaxoClient:
             json_body: Optional JSON body for request
             params: Optional query parameters
             headers: Optional HTTP headers
+            endpoint_type: Type of endpoint for rate limiting ("quotes", "bars", "orders", "default")
         
         Returns:
             JSON response as dictionary
@@ -489,6 +493,8 @@ class SaxoClient:
         Raises:
             SaxoAPIError: If request fails or returns error status
         """
+        self._enforce_min_interval(endpoint_type)
+
         url = f"{self.base_url}{path}"
         
         request_headers = self.headers.copy()
@@ -529,7 +535,8 @@ class SaxoClient:
         self,
         path: str,
         params: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None
+        headers: Optional[Dict[str, str]] = None,
+        endpoint_type: str = "default"
     ) -> Dict[str, Any]:
         """
         Make DELETE request to Saxo API.
@@ -538,6 +545,7 @@ class SaxoClient:
             path: API endpoint path
             params: Optional query parameters
             headers: Optional HTTP headers
+            endpoint_type: Type of endpoint for rate limiting ("quotes", "bars", "orders", "default")
         
         Returns:
             JSON response as dictionary
@@ -545,6 +553,8 @@ class SaxoClient:
         Raises:
             SaxoAPIError: If request fails or returns error status
         """
+        self._enforce_min_interval(endpoint_type)
+
         url = f"{self.base_url}{path}"
         
         request_headers = self.headers.copy()

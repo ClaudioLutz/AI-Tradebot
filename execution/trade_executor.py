@@ -13,7 +13,7 @@ from execution.position import PositionManager, PositionAwareGuards, ExecutionCo
 from execution.precheck import PrecheckClient, RetryConfig as PrecheckRetryConfig
 from execution.placement import OrderPlacementClient, PlacementConfig, ExecutionOutcome, PlacementStatus
 from execution.disclaimers import DisclaimerService, DisclaimerConfig, DisclaimerResolutionOutcome
-from execution.utils import RateLimitedSaxoClient
+# RateLimitedSaxoClient removed
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -51,8 +51,8 @@ class SaxoTradeExecutor(TradeExecutor):
         client_key: str,
         config: Dict[str, Any] = None
     ):
-        # Wrap client with rate limiting logic
-        self.client = RateLimitedSaxoClient(saxo_client)
+        # Client now handles rate limiting internally
+        self.client = saxo_client
 
         self.account_key = account_key
         self.client_key = client_key
@@ -96,6 +96,17 @@ class SaxoTradeExecutor(TradeExecutor):
         5. Placement (if not dry_run)
         6. Reconciliation (if needed)
         """
+        # Validate intent matches executor scope
+        if intent.client_key != self.client_key:
+             raise ValueError(f"Intent ClientKey {intent.client_key} mismatch with Executor {self.client_key}")
+        if intent.account_key != self.account_key:
+             raise ValueError(f"Intent AccountKey {intent.account_key} mismatch with Executor {self.account_key}")
+
+        # Ensure request_id is set (Trace ID)
+        if not intent.request_id:
+             import uuid
+             intent.request_id = str(uuid.uuid4())
+
         # Ensure external reference is set (2.2)
         if not intent.external_reference:
             from execution.utils import generate_external_reference
@@ -112,7 +123,8 @@ class SaxoTradeExecutor(TradeExecutor):
                 "uic": intent.uic,
                 "buy_sell": intent.buy_sell.value,
                 "amount": float(intent.amount),
-                "dry_run": dry_run
+                "dry_run": dry_run,
+                "request_id": intent.request_id
             }
         )
 
@@ -198,7 +210,17 @@ class SaxoTradeExecutor(TradeExecutor):
             )
 
         # 5. Placement
-        placement_config = PlacementConfig(dry_run=dry_run)
+        if dry_run:
+            logger.info(f"DRY RUN: Skipping placement for {intent.external_reference}")
+            return ExecutionResult(
+                status=ExecutionStatus.DRY_RUN,
+                order_intent=intent,
+                precheck_result=precheck_result,
+                request_id=intent.request_id,
+                timestamp=datetime.utcnow().isoformat()
+            )
+
+        placement_config = PlacementConfig(dry_run=False) # force false as we handled it above
         placement_client = OrderPlacementClient(self.client, placement_config)
         
         execution_outcome = placement_client.place_order(intent, precheck_result)
@@ -209,9 +231,6 @@ class SaxoTradeExecutor(TradeExecutor):
             status = ExecutionStatus.FAILED_PLACEMENT
         elif execution_outcome.final_status == "uncertain":
             status = ExecutionStatus.RECONCILIATION_NEEDED
-        # DRY_RUN handling: ExecutionOutcome will have status success but no order_id
-        if dry_run:
-            status = ExecutionStatus.DRY_RUN
 
         # Safely extract error message (1.2)
         error_msg = None
@@ -225,8 +244,9 @@ class SaxoTradeExecutor(TradeExecutor):
         return ExecutionResult(
             status=status,
             order_intent=intent,
-            # precheck_result=..., # map if needed
+            precheck_result=precheck_result,
             order_id=execution_outcome.order_id,
+            request_id=execution_outcome.request_id or intent.request_id,
             error_message=error_msg,
             timestamp=execution_outcome.timestamp.isoformat() if execution_outcome.timestamp else datetime.utcnow().isoformat(),
             needs_reconciliation=(execution_outcome.final_status == "uncertain")

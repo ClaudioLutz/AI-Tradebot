@@ -26,6 +26,7 @@ class ExecutionOutcome:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     placement: Any = None # Raw placement response wrapper or similar
     reconciliation: Optional[dict] = None
+    request_id: Optional[str] = None
 
 @dataclass
 class PlacementStatus:
@@ -83,7 +84,8 @@ class OrderPlacementClient:
             response_data = self.client.post(
                 "/trade/v2/orders",
                 json_body=payload,
-                headers={"x-request-id": request_id}
+                headers={"x-request-id": request_id},
+                endpoint_type="orders"
             )
 
             # Success
@@ -97,6 +99,7 @@ class OrderPlacementClient:
             return ExecutionOutcome(
                 final_status="success",
                 order_id=order_id,
+                request_id=request_id,
                 placement=PlacementStatus(http_status=200, raw=response_data)
             )
 
@@ -138,10 +141,20 @@ class OrderPlacementClient:
 
         if found_order:
             order_id = found_order.get("OrderId")
-            self.logger.info(f"Reconciliation found order {order_id}")
+            status = found_order.get("Status")
+            self.logger.info(f"Reconciliation found order {order_id} with status {status}")
+
+            # Map status to outcome
+            final_status = "uncertain"
+            if status in ["Working", "Filled", "Placed", "PartnerDeal", "PartiallyFilled"]:
+                final_status = "success"
+            elif status in ["Rejected", "Expired", "Canceled", "Cancelled"]:
+                final_status = "failure"
+
             return ExecutionOutcome(
-                final_status="success", # It exists
+                final_status=final_status,
                 order_id=order_id,
+                request_id=request_id,
                 reconciliation=found_order
             )
 
