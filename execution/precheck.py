@@ -70,9 +70,9 @@ class PrecheckClient:
             headers=headers
         )
 
-        return self._parse_precheck_response(response_data)
+        return self._parse_precheck_response(response_data, request_id)
 
-    def _parse_precheck_response(self, data: dict) -> PrecheckResult:
+    def _parse_precheck_response(self, data: dict, request_id: Optional[str] = None) -> PrecheckResult:
         """
         Parse Saxo precheck response data into PrecheckResult.
         """
@@ -82,7 +82,8 @@ class PrecheckClient:
                 success=False,
                 error_code=data["ErrorInfo"].get("ErrorCode"),
                 error_message=data["ErrorInfo"].get("Message"),
-                raw_response=data
+                raw_response=data,
+                request_id=request_id
             )
 
         # Extract costs
@@ -113,5 +114,6 @@ class PrecheckClient:
             margin_impact=margin_impact,
             disclaimer_tokens=disclaimer_tokens,
             disclaimer_context=disclaimer_context,
-            raw_response=data
+            raw_response=data,
+            request_id=request_id
         )

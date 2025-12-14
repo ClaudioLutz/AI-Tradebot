@@ -26,6 +26,7 @@ class ExecutionOutcome:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     placement: Any = None # Raw placement response wrapper or similar
     reconciliation: Optional[dict] = None
+    request_id: Optional[str] = None # UUID used for the placement call
 
 @dataclass
 class PlacementStatus:
@@ -61,7 +62,8 @@ class OrderPlacementClient:
             return ExecutionOutcome(
                 final_status="success",
                 order_id="DRY_RUN_ID",
-                placement=PlacementStatus(http_status=200, raw={"OrderId": "DRY_RUN_ID"})
+                placement=PlacementStatus(http_status=200, raw={"OrderId": "DRY_RUN_ID"}),
+                request_id=request_id
             )
 
         # Build payload using utility to ensure consistency and Decimal handling
@@ -97,7 +99,8 @@ class OrderPlacementClient:
             return ExecutionOutcome(
                 final_status="success",
                 order_id=order_id,
-                placement=PlacementStatus(http_status=200, raw=response_data)
+                placement=PlacementStatus(http_status=200, raw=response_data),
+                request_id=request_id
             )
 
         except Exception as e:
@@ -115,7 +118,8 @@ class OrderPlacementClient:
                 # Definitive failure
                 return ExecutionOutcome(
                     final_status="failure",
-                    placement=PlacementStatus(http_status=status_code, error_info={"Message": str(e)})
+                    placement=PlacementStatus(http_status=status_code, error_info={"Message": str(e)}),
+                    request_id=request_id
                 )
 
             # Otherwise treat as uncertain and reconcile
@@ -137,17 +141,33 @@ class OrderPlacementClient:
         found_order = self._scan_by_external_reference(intent)
 
         if found_order:
+            # Check actual order status (Issue 6)
+            order_status = found_order.get("Status", "Unknown")
             order_id = found_order.get("OrderId")
-            self.logger.info(f"Reconciliation found order {order_id}")
+
+            # Map specific failure statuses
+            if order_status in ["Rejected", "Expired", "Cancelled"]: # Cancelled might be success if intention was cancel? But here we are placing.
+                 self.logger.info(f"Reconciliation found order {order_id} but status is {order_status}")
+                 return ExecutionOutcome(
+                    final_status="failure",
+                    order_id=order_id,
+                    reconciliation=found_order,
+                    request_id=request_id,
+                    placement=PlacementStatus(http_status=200, error_info={"Message": f"Order found but status is {order_status}"})
+                 )
+
+            self.logger.info(f"Reconciliation found order {order_id} with status {order_status}")
             return ExecutionOutcome(
-                final_status="success", # It exists
+                final_status="success",
                 order_id=order_id,
-                reconciliation=found_order
+                reconciliation=found_order,
+                request_id=request_id
             )
 
         return ExecutionOutcome(
             final_status="uncertain", # We couldn't confirm it exists or failed
-            placement=PlacementStatus(http_status=500, error_info={"Message": str(error)})
+            placement=PlacementStatus(http_status=500, error_info={"Message": str(error)}),
+            request_id=request_id
         )
 
     def _scan_by_external_reference(self, intent: OrderIntent) -> Optional[dict]:

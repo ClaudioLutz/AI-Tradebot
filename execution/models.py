@@ -97,6 +97,9 @@ class PrecheckResult:
     # Raw response for debugging
     raw_response: Optional[dict] = None
 
+    # Traceability
+    request_id: Optional[str] = None # The UUID used for the precheck call
+
 class ExecutionStatus(Enum):
     SUCCESS = "success"  # Order placed successfully
     DRY_RUN = "dry_run"  # Precheck ok, no placement (DRY_RUN mode)

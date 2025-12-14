@@ -268,6 +268,8 @@ class SaxoClient:
         
         # Track last request times for rate limiting
         self._last_request_times: Dict[str, float] = {}
+        # Simple token bucket or just last_order_time for order throttling
+        self._last_order_time = 0.0
     
     @property
     def headers(self) -> Dict[str, str]:
@@ -287,15 +289,16 @@ class SaxoClient:
         Enforce minimum polling interval for an endpoint type.
         
         Args:
-            endpoint_type: Type of endpoint ("quotes", "bars", or "default")
+            endpoint_type: Type of endpoint ("quotes", "bars", "orders", "default")
         """
         min_intervals = {
             "quotes": MIN_QUOTES_POLL_SECONDS,
             "bars": MIN_BARS_POLL_SECONDS,
-            "default": 1.0
+            "orders": 1.0, # Proactive 1 order/sec throttle (Story 005-007)
+            "default": 0.0 # Default no throttling for general GETs unless specified
         }
         
-        min_interval = min_intervals.get(endpoint_type, 1.0)
+        min_interval = min_intervals.get(endpoint_type, 0.0)
         last_time = self._last_request_times.get(endpoint_type, 0)
         elapsed = time.time() - last_time
         
@@ -494,6 +497,10 @@ class SaxoClient:
         request_headers = self.headers.copy()
         if headers:
             request_headers.update(headers)
+
+        # Proactive throttling for order placement endpoints
+        if "/trade/v2/orders" in path:
+            self._enforce_min_interval("orders")
 
         try:
             response = requests.post(

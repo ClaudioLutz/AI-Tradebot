@@ -222,11 +222,10 @@ class InstrumentValidator:
             is_tradable = data["TradingStatus"].get("IsTradable")
             non_tradable_reason = data["TradingStatus"].get("NonTradableReason")
 
-        # Default to True if still None? Better to be safe and default to False?
-        # Saxo usually provides it. If missing, assume True but log?
-        # Code used to default to True.
+        # Default to False if missing (Fail Closed) (Issue 7)
         if is_tradable is None:
-            is_tradable = True
+            logger.warning(f"IsTradable missing for {uic}, defaulting to False")
+            is_tradable = False
 
         # Market State
         market_state_str = None
