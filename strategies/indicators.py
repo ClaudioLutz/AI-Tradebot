@@ -13,7 +13,7 @@ Key Principles:
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -187,16 +187,18 @@ def safe_slice_bars(
             raise ValueError(f"Invalid timestamp at index {i}: {e}")
     
     if require_closed:
-        # Validate as_of is timezone-aware to prevent subtle bugs
+        # Validate as_of is timezone-aware and UTC by semantics (not just object identity)
         if as_of.tzinfo is None:
             raise ValueError(
                 f"as_of must be timezone-aware (got naive datetime: {as_of}). "
                 f"Use datetime.now(timezone.utc) or ensure decision_time_utc has timezone info."
             )
         
-        if as_of.tzinfo != timezone.utc:
+        # Accept UTC by semantics, not just timezone.utc object identity
+        # This accepts ZoneInfo("UTC"), pytz.UTC, etc.
+        if as_of.utcoffset() != timedelta(0):
             raise ValueError(
-                f"as_of must be in UTC timezone (got tzinfo={as_of.tzinfo}). "
+                f"as_of must be in UTC timezone (got utcoffset={as_of.utcoffset()}). "
                 f"Convert to UTC before calling safe_slice_bars()."
             )
         
@@ -205,25 +207,34 @@ def safe_slice_bars(
         filtered_bars = []
         
         for bar in bars:
-            # CRITICAL: Always check bar_time < as_of to prevent look-ahead bias,
-            # even if is_closed=True. This protects against mislabeled is_closed flags
-            # or accidentally passing future bars in backtests.
+            # CRITICAL: Always check bar_time < as_of to prevent look-ahead bias.
+            # Additionally, if is_closed flag is present, enforce it.
             try:
                 bar_time = datetime.fromisoformat(bar["timestamp"].replace('Z', '+00:00'))
                 
                 # Require BOTH conditions for safety:
-                # 1. Bar timestamp strictly before decision time
-                # 2. Bar is marked closed OR we can infer closure from timestamp
-                if bar_time < reference_time:
-                    # Bar is in the past, so it's safe to use
-                    filtered_bars.append(bar)
-                elif bar.get("is_closed", False):
-                    # If bar claims to be closed but timestamp >= reference_time,
-                    # this is a data quality issue - log warning and skip
-                    logger.warning(
-                        f"Bar marked is_closed=True but timestamp {bar['timestamp']} "
-                        f"is not before decision time {as_of.isoformat()}. Skipping to prevent look-ahead bias."
-                    )
+                # 1. Bar timestamp strictly before decision time (prevents look-ahead bias)
+                # 2. Bar is marked closed (if is_closed flag present) OR we infer closure from timestamp
+                
+                # First check: timestamp must be in the past
+                if bar_time >= reference_time:
+                    # Bar is not in the past - skip it
+                    if bar.get("is_closed", False):
+                        # Data quality issue: bar claims to be closed but timestamp >= reference_time
+                        logger.warning(
+                            f"Bar marked is_closed=True but timestamp {bar['timestamp']} "
+                            f"is not before decision time {as_of.isoformat()}. Skipping to prevent look-ahead bias."
+                        )
+                    continue
+                
+                # Second check: if is_closed flag exists, it must be True
+                if "is_closed" in bar and not bar["is_closed"]:
+                    # Bar exists in data but is not closed - skip it
+                    continue
+                
+                # Bar passed all checks - safe to use
+                filtered_bars.append(bar)
+                
             except (ValueError, KeyError):
                 # Skip bars with invalid timestamps when require_closed=True
                 continue

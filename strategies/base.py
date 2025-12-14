@@ -160,7 +160,8 @@ class BaseStrategy(ABC):
     
     Contract (Idempotency):
         Same inputs ⇒ same outputs (same market_data + decision_time_utc → same signals).
-        Important for retries and testing.
+        Note: Signal.timestamp varies with wall-clock time unless a timestamp_provider is injected.
+        For truly deterministic testing/backtesting, inject a timestamp_provider in constructor.
     
     Contract (Time Semantics):
         - decision_time_utc is the "as-of" timestamp
@@ -170,7 +171,23 @@ class BaseStrategy(ABC):
     Contract (Explainability):
         - Every signal must have a clear reason code
         - Reason + metadata must fully explain the decision
+    
+    Attributes:
+        timestamp_provider: Optional callable that returns datetime for Signal.timestamp.
+            Defaults to None (uses datetime.now(timezone.utc)).
+            Inject a fixed-time provider for deterministic testing.
     """
+    
+    def __init__(self, timestamp_provider=None):
+        """
+        Initialize base strategy.
+        
+        Args:
+            timestamp_provider: Optional callable that returns datetime.
+                Used for Signal.timestamp generation. If None, uses wall-clock time.
+                For deterministic testing: lambda: datetime(2025, 1, 15, tzinfo=timezone.utc)
+        """
+        self.timestamp_provider = timestamp_provider
 
     @abstractmethod
     def generate_signals(

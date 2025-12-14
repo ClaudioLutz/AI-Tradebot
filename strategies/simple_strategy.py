@@ -16,18 +16,14 @@ See strategies/moving_average.py for a reference implementation.
 
 import warnings
 
-warnings.warn(
-    "strategies.simple_strategy is deprecated. "
-    "Use strategies.moving_average.MovingAverageCrossoverStrategy or implement "
-    "your own strategy by inheriting from strategies.base.BaseStrategy",
-    DeprecationWarning,
-    stacklevel=2
-)
-
 
 def generate_signal(data):
     """
     DEPRECATED: Use BaseStrategy.generate_signals() instead.
+    
+    This function is deprecated and will be removed in a future version.
+    Use MovingAverageCrossoverStrategy or implement your own strategy
+    by inheriting from BaseStrategy.
     
     Args:
         data: Market data for analysis
@@ -36,8 +32,15 @@ def generate_signal(data):
         str: Trading signal ('BUY', 'SELL', or 'HOLD')
     
     Raises:
-        DeprecationWarning: This function is deprecated
+        NotImplementedError: This function is deprecated
     """
+    warnings.warn(
+        "generate_signal() is deprecated. "
+        "Use strategies.moving_average.MovingAverageCrossoverStrategy or implement "
+        "your own strategy by inheriting from strategies.base.BaseStrategy",
+        DeprecationWarning,
+        stacklevel=2
+    )
     raise NotImplementedError(
         "This function is deprecated. Use MovingAverageCrossoverStrategy or "
         "implement your own strategy by inheriting from BaseStrategy."
@@ -48,6 +51,9 @@ def calculate_indicators(data):
     """
     DEPRECATED: Use strategies.indicators module instead.
     
+    This function is deprecated and will be removed in a future version.
+    Use functions from strategies.indicators module instead.
+    
     Args:
         data: Historical price data
     
@@ -55,8 +61,15 @@ def calculate_indicators(data):
         dict: Calculated indicators
     
     Raises:
-        DeprecationWarning: This function is deprecated
+        NotImplementedError: This function is deprecated
     """
+    warnings.warn(
+        "calculate_indicators() is deprecated. "
+        "Use functions from strategies.indicators module like "
+        "simple_moving_average(), exponential_moving_average(), etc.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     raise NotImplementedError(
         "This function is deprecated. Use functions from strategies.indicators "
         "like simple_moving_average(), exponential_moving_average(), etc."

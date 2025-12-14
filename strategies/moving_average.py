@@ -60,6 +60,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         long_window: int = 20,
         threshold_bps: Optional[int] = None,
         cooldown_bars: Optional[int] = None,
+        timestamp_provider=None,
     ):
         """
         Initialize Moving Average Crossover strategy.
@@ -69,10 +70,14 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             long_window: Long MA period (default 20)
             threshold_bps: Minimum MA separation in bps to trigger signal (optional)
             cooldown_bars: Minimum bars between trades to prevent churn (optional)
+            timestamp_provider: Optional callable for deterministic timestamps (testing/backtesting)
         
         Raises:
             ValueError: If short_window >= long_window or windows invalid
         """
+        # Initialize parent class with timestamp_provider
+        super().__init__(timestamp_provider=timestamp_provider)
+        
         if short_window <= 0 or long_window <= 0:
             raise ValueError("Window sizes must be positive integers")
         
@@ -121,7 +126,8 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         validate_decision_time_utc(decision_time_utc)
         
         signals = {}
-        wall_clock_timestamp = get_current_timestamp()
+        # Use self.timestamp_provider for deterministic timestamps in tests/backtests
+        wall_clock_timestamp = get_current_timestamp(self.timestamp_provider)
         # CRITICAL FIX (Priority 1A): Use decision_time_utc for signal.decision_time
         # This ensures determinism and matches epic contract
         decision_time_str = decision_time_utc.isoformat().replace('+00:00', 'Z')
@@ -177,8 +183,9 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 )
                 continue
             
-            # Extract decision time (last bar close) and data time range
-            decision_time = valid_bars[-1]["timestamp"]
+            # Extract data time range (bar timestamps for audit trail)
+            # NOTE: We use decision_time_utc for Signal.decision_time (Epic 004 contract)
+            # Bar timestamps go in data_time_range for reference
             data_time_range = {
                 "first_bar": valid_bars[0]["timestamp"],
                 "last_bar": valid_bars[-1]["timestamp"]
@@ -206,7 +213,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                     action="HOLD",
                     reason="SIG_INSUFFICIENT_DATA",
                     timestamp=wall_clock_timestamp,
-                    decision_time=decision_time,
+                    decision_time=decision_time_str,  # FIXED: Use decision_time_utc
                     strategy_version="moving_average_v1.0",
                 )
                 continue
@@ -310,11 +317,12 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
                 }
             
             # Create signal with enhanced schema
+            # CRITICAL: Use decision_time_str (from decision_time_utc) per Epic 004 contract
             signals[instrument_id] = Signal(
                 action=action,
                 reason=reason,
                 timestamp=wall_clock_timestamp,
-                decision_time=decision_time,
+                decision_time=decision_time_str,  # FIXED: Use decision_time_utc
                 strategy_version="moving_average_v1.0",
                 price_ref=last_close_price,
                 price_type="close",
