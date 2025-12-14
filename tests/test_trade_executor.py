@@ -9,10 +9,12 @@ import logging
 def mock_saxo_client():
     client = Mock()
     # Mock instrument details for validation
+    # Updated to include MarketState because updated validation requires it
     client.get.return_value = {
         "IsTradable": True,
         "Format": {"Decimals": 0},
-        "SupportedOrderTypes": [{"OrderType": "Market", "DurationTypes": ["DayOrder"]}]
+        "SupportedOrderTypes": [{"OrderType": "Market", "DurationTypes": ["DayOrder"]}],
+        "TradingStatus": {"MarketState": "Open"}
     }
     return client
 

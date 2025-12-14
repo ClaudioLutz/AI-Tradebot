@@ -116,27 +116,25 @@ class InstrumentConstraints:
     def validate_market_state(self) -> Tuple[bool, Optional[str]]:
         """
         Validate if market state allows trading.
-        Block auctions for immediate execution.
+        Fail-closed for unknown or restrictive states. (2.1)
         """
-        if not self.market_state:
-            return True, None # Assume open if unknown
+        if not self.market_state or self.market_state == MarketState.UNKNOWN:
+            return False, "Market state is Unknown, blocking trade."
 
-        # Block Auction states
+        # Block Auction states, Pre/Post trading, and Closed
         blocked_states = {
             MarketState.OPENING_AUCTION,
             MarketState.CLOSING_AUCTION,
             MarketState.INTRADAY_AUCTION,
-            MarketState.TRADING_AT_LAST # Often implies restricted trading
+            MarketState.TRADING_AT_LAST,
+            MarketState.PRE_TRADING,
+            MarketState.POST_TRADING,
+            MarketState.CLOSED,
+            MarketState.UNKNOWN
         }
-
-        # Also Pre/Post trading? Usually implied by Closed or similar.
-        # But if specifically Auction, block it.
 
         if self.market_state in blocked_states:
             return False, f"Market is in {self.market_state.value} state, trading restricted."
-
-        if self.market_state == MarketState.CLOSED:
-             return False, "Market is Closed."
 
         return True, None
 
