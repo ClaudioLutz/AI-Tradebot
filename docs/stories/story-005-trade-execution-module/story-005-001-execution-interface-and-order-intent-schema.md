@@ -28,6 +28,7 @@ Out of scope:
    `(account_key, asset_type, uic, buy_sell, amount, order_type='Market', order_duration, external_reference, request_id)`.
 2. `external_reference` is generated for every intent and is validated to be <= 50 characters.
 3. `request_id` is generated for every mutation attempt and is emitted as `x-request-id` for:
+   - POST /trade/v2/orders/precheck (correlation + helps avoid tight-loop duplicate behavior)
    - POST /trade/v2/orders
    - PATCH /trade/v2/orders (future)
    - DELETE /trade/v2/orders (future)

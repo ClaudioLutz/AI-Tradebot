@@ -59,6 +59,8 @@ The following table defines the default market state policy. This table is the *
 
 ### Market State Enumeration
 
+**Source-of-truth note**: The MarketState values in this story are taken from Saxo’s canonical **MarketState** definition. Ensure we track *all* values Saxo documents, including `Unknown`, and that unit tests cover the full enum.
+
 ```python
 from enum import Enum
 from typing import Optional, Set
@@ -534,8 +536,8 @@ market_state_policy:
 
 ## Test Plan
 - Unit tests:
-  - **Policy Table Compliance**: For each market state in the Default Policy Table, verify allow/block decision matches table exactly
-  - Test cases for all 9 market states: Open (allow), Closed/Unknown/OpeningAuction/ClosingAuction/IntraDayAuction/TradingAtLast/PreMarket/PostMarket (all block)
+  - **Policy Table Compliance**: For each MarketState value Saxo documents, verify allow/block decision matches the Default Policy Table / configured overrides.
+  - Ensure coverage includes: `Open`, `Closed`, `Unknown`, `OpeningAuction`, `ClosingAuction`, `IntraDayAuction`, `TradingAtLast`, `PreMarket`, `PostMarket`.
   - Config override allows selected states (e.g., FxSpot with PreMarket/PostMarket)
   - Missing state defaults to block (unless `allow_on_missing=True`)
   - Asset-type override logic (FxSpot allows PreMarket/PostMarket, Stock blocks them)

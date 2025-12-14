@@ -21,7 +21,7 @@ In scope:
 - Ensure the orchestrator loop never crashes on HTTP exceptions.
 
 ## Acceptance Criteria
-1. Executor enforces max 1 order placement per second per session (local limiter is global/process-wide).
+1. Executor enforces max 1 order placement per second **per session** (OAuth token): the limiter is scoped per-token (or per AccountKey+token) rather than a single global limiter.
 2. Rate limiter reads and uses `X-RateLimit-*` headers to compute next allowed time (not just `sleep(1.0)`).
 3. On 429, executor backs off and retries up to N times (configurable), and logs rate limit headers when present.
 4. On 409 conflict (duplicate operation), executor does not retry automatically and logs an explicit message
@@ -114,18 +114,21 @@ class TokenBucketRateLimiter:
                 tokens_remaining=round(self.tokens, 3)
             )
             
-    def set_reset_time(self, reset_timestamp: Optional[int]) -> None:
+    def set_reset_after(self, reset_after_seconds: Optional[int]) -> None:
         """
-        Set explicit wait time based on X-RateLimit-Reset header
-        
+        Set explicit wait time based on X-RateLimit-...-Reset header.
+
+        Saxo documents Reset as **seconds until quota reset** (a duration),
+        not an absolute Unix timestamp.
+
         Args:
-            reset_timestamp: Unix timestamp when rate limit resets
+            reset_after_seconds: seconds until the rate limit resets
         """
-        if reset_timestamp:
-            self._wait_until = float(reset_timestamp)
+        if reset_after_seconds is not None:
+            self._wait_until = time.time() + float(reset_after_seconds)
             logger.warning(
                 "rate_limit_reset_scheduled",
-                reset_at=datetime.fromtimestamp(reset_timestamp).isoformat(),
+                reset_after_seconds=int(reset_after_seconds),
                 wait_seconds=round(self._wait_until - time.time(), 2)
             )
 ```
@@ -140,7 +143,7 @@ class RateLimitInfo:
     """Parsed rate limit information from response headers"""
     session_orders_limit: Optional[int] = None
     session_orders_remaining: Optional[int] = None
-    session_orders_reset: Optional[int] = None  # Unix timestamp
+    session_orders_reset: Optional[int] = None  # seconds-until-reset (duration)
     session_requests_limit: Optional[int] = None
     session_requests_remaining: Optional[int] = None
     session_requests_reset: Optional[int] = None
@@ -364,8 +367,8 @@ class RetryPolicy:
                     # Parse reset time if available
                     if hasattr(e, 'headers'):
                         rate_info = parse_rate_limit_headers(e.headers)
-                        if rate_info.session_orders_reset:
-                            self.rate_limiter.set_reset_time(rate_info.session_orders_reset)
+                        if rate_info.session_orders_reset is not None:
+                            self.rate_limiter.set_reset_after(rate_info.session_orders_reset)
                 
                 # Check if we should retry
                 if attempt < self.config.max_retries:
@@ -454,12 +457,17 @@ class RequestIdManager:
         Recommendation: Generate NEW request_id on retry to avoid
         409 Conflict if the original request partially succeeded
         
-        Saxo's duplicate detection is based on:
-        - Same URL + same request body + same x-request-id
-        - Within 15-second window
-        
-        Changing request_id allows retry to proceed even if first attempt
-        is still in-flight or uncertain.
+Saxo's duplicate prevention window is described as applying to:
+        - identical URL + identical request body
+        - within a rolling ~15-second window
+
+Saxo guidance: use a **different** `x-request-id` if you *deliberately* want to execute
+an otherwise-identical operation within that window.
+
+Important for retries:
+- In an *unknown outcome* scenario (timeout / connection drop), do **not** automatically
+  “bypass” duplicate protection by changing `x-request-id` and resubmitting.
+- Prefer reconciliation / status checks first (then decide whether to retry).
         """
         # Always use new request_id on retry
         return True
@@ -573,7 +581,7 @@ class OrderExecutor:
     def __init__(self, client: SaxoClient):
         self.client = client
         
-        # Initialize rate limiter (global singleton)
+        # Initialize rate limiter (scoped per session/token)
         rate_config = RateLimitConfig(orders_per_second=1.0)
         self.rate_limiter = TokenBucketRateLimiter(rate_config)
         
@@ -686,7 +694,7 @@ class OrderExecutor:
 ```
 
 ## Implementation Notes
-- **Rate Limiter Scope**: Use a singleton rate limiter per process to enforce global 1 order/sec limit across all strategies/accounts
+- **Rate Limiter Scope**: Instantiate / retrieve a rate limiter **per OAuth token (session)** (or per AccountKey+token). Do not use one global limiter for all sessions, otherwise multi-session runs unnecessarily throttle each other.
 - **Header-Driven Throttling**: Parse rate limit headers (`X-RateLimit-SessionOrders-*`) and use them to compute next allowed time, not just `sleep(1.0)`
 - **Token Bucket**: Provides smooth rate limiting with deterministic behavior for testing
 - **Jitter**: Prevents thundering herd when multiple operations retry simultaneously
@@ -711,21 +719,26 @@ class OrderExecutor:
 ## Critical Correctness Notes
 
 ### Saxo Duplicate Detection Mechanics
-Saxo detects duplicate operations based on:
-1. **Same URL** (endpoint path)
-2. **Same request body** (all fields including external_reference)
-3. **Same x-request-id** header
-4. **Within 15-second rolling window**
+Saxo describes duplicate-operation prevention as:
+1. **Identical URL** (endpoint path)
+2. **Identical request body**
+3. Within a rolling ~15-second window
 
-**Implication**: Changing external_reference OR x-request-id allows retry to proceed. For safe retry after timeout, keep external_reference constant (for reconciliation) but change x-request-id (to bypass duplicate detection).
+How `x-request-id` fits in:
+- Use `x-request-id` for correlation and safe client-side tracking.
+- If you *need* to perform an identical operation inside the duplicate window, provide a **different** `x-request-id`.
+
+Retry safety note:
+- For *unknown outcome* cases, changing `x-request-id` and resubmitting can create duplicates.
+- Preferred strategy: reconcile first; only retry when you have high confidence the original did not succeed.
 
 ### Rate Limiting Behavior
 Per Saxo documentation:
 - Limit is **per session** (OAuth token), not per process
 - Multiple processes sharing same token share the limit
 - Headers provide real-time limit status
-- 429 responses include `X-RateLimit-SessionOrders-Reset` timestamp
-- Respect reset time rather than fixed backoff
+- 429 responses include `X-RateLimit-SessionOrders-Reset` as **seconds until reset**
+- Respect that duration rather than treating it as an epoch timestamp
 
 ## Primary Sources
 - https://www.developer.saxo/openapi/learn/rate-limiting

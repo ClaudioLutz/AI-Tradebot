@@ -83,6 +83,22 @@ Authorization: Bearer {access_token}
 }
 ```
 
+#### Failure With Pre-Trade Disclaimers (placement errors may include disclaimers)
+```json
+{
+  "ErrorInfo": {
+    "ErrorCode": "DisclaimersNotAccepted",
+    "Message": "Pre-trade disclaimers must be accepted before placing this order"
+  },
+  "PreTradeDisclaimers": {
+    "DisclaimerContext": "OrderPlacement",
+    "DisclaimerTokens": [
+      "DM_RISK_WARNING_2025_Q1"
+    ]
+  }
+}
+```
+
 #### TradeNotCompleted Response
 ```json
 {
@@ -768,7 +784,8 @@ SUCCESS  FAILURE SUCCESS  FAILURE  UNCERTAIN
    - If OrderId is present, executor queries Portfolio orders to determine current order status.
    - Reconciliation outcome is logged (e.g., "placed", "not found", "unknown").
 5. Placement is never attempted if precheck failed or disclaimers policy blocks the trade.
-6. DRY_RUN mode logs but never executes actual placement.
+6. If placement fails and returns `PreTradeDisclaimers`, the executor captures and logs them (same shape as precheck: `DisclaimerContext: string`, `DisclaimerTokens: string[]`) so operators can resolve via the DM flow.
+7. DRY_RUN mode logs but never executes actual placement.
 
 ## Implementation Notes
 - Prefer `OrderDuration.DurationType = DayOrder` for Market orders unless there is a strategy-level override.
@@ -776,6 +793,7 @@ SUCCESS  FAILURE SUCCESS  FAILURE  UNCERTAIN
 - Build reconciliation around `GET /port/v1/orders` using `OrderId` filter.
 - Keep reconciliation bounded (e.g., single query, then mark unknown; do not loop indefinitely).
 - Use `x-request-id` header for all placement requests to enable request tracing.
+- Placement can fail with `PreTradeDisclaimers` (per Saxo release notes). Treat that as a *hard block* unless disclaimer policy resolves them (Story 005-005).
 - Implement appropriate timeouts: 30s for placement, 10s for reconciliation queries.
 - Always log with structured fields including correlation IDs.
 

@@ -22,41 +22,55 @@ Out of scope:
 - UI/UX for presenting disclaimers to a human
 - Accepting blocking disclaimers (not possible by definition)
 
+**Breaking-change note**: Saxo is rolling out mandatory pre-trade disclaimers for order flows. This story is intentionally “safe-by-default + auditable”: if anything is ambiguous, we block trading and log.
+
 ## Technical Details
 
 ### API Endpoint Specification
 
 #### Get Disclaimer Details
 ```
-GET https://gateway.saxobank.com/sim/openapi/dm/v2/disclaimers?tokens={token1}&tokens={token2}...
+GET https://gateway.saxobank.com/sim/openapi/dm/v2/disclaimers?DisclaimerTokens={token1}&DisclaimerTokens={token2}...
 Authorization: Bearer {access_token}
 x-request-id: {uuid}
 ```
 
-**Note**: The `tokens` parameter can be repeated to fetch multiple disclaimers in one call.
+**Note on array encoding**: document the chosen encoding in the implementation:
+- Either *repeated params* (recommended for clarity): `...&DisclaimerTokens=t1&DisclaimerTokens=t2`
+- Or *comma-separated* if your HTTP client encodes arrays that way.
+
+Do **not** use `Token=` or `tokens=` in this endpoint.
 
 #### Register Disclaimer Response
 ```
 POST https://gateway.saxobank.com/sim/openapi/dm/v2/disclaimers
 Content-Type: application/json
 Authorization: Bearer {access_token}
+x-request-id: {uuid}
 
 {
-  "Token": "string",
-  "Accepted": boolean
+  "DisclaimerContext": "OrderPrecheck",
+  "DisclaimerToken": "string",
+  "ResponseType": "Accepted",
+  "UserInput": "optional free text"
 }
 ```
 
-### Disclaimer Types
+### Internal Disclaimer Classification (normalized)
 
-| Type | Description | Can Auto-Accept | Blocks Trading |
-|------|-------------|-----------------|----------------|
-| Normal | Standard risk disclaimers | Yes (with config) | Only until accepted |
-| Blocking | Critical disclaimers requiring human review | No (never) | Always blocks automated trading |
+Saxo’s DM disclaimer detail payload uses `IsBlocking` (boolean). Internally we normalize to:
+
+| Field | Meaning |
+|------|---------|
+| `blocking: bool` | Derived from `IsBlocking` |
+
+Acceptance rules:
+- If `blocking == true` ⇒ **never auto-accept**.
+- If `blocking == false` ⇒ may auto-accept **only if** policy allows.
 
 ### Response Payload Models
 
-#### Precheck Response with Disclaimers
+#### Precheck / Placement Response with Disclaimers
 ```json
 {
   "PreCheckResult": "Ok",
@@ -65,11 +79,7 @@ Authorization: Bearer {access_token}
     "Currency": "USD"
   },
   "PreTradeDisclaimers": {
-    "DisclaimerContext": {
-      "ContextType": "OrderPrecheck",
-      "AccountKey": "Gv1B3n...",
-      "Uic": 211
-    },
+    "DisclaimerContext": "OrderPrecheck",
     "DisclaimerTokens": [
       "DM_RISK_WARNING_2025_Q1",
       "DM_REGULATORY_NOTICE_EU"
@@ -78,24 +88,25 @@ Authorization: Bearer {access_token}
 }
 ```
 
-#### Disclaimer Details Response
+#### Disclaimer Details Response (DM)
 ```json
 {
-  "Token": "DM_RISK_WARNING_2025_Q1",
-  "Type": "Normal",
+  "DisclaimerToken": "DM_RISK_WARNING_2025_Q1",
+  "IsBlocking": false,
   "Title": "Risk Warning",
-  "Content": "Trading in financial instruments involves substantial risk...",
-  "RequiresResponse": true,
-  "ExpiresAt": "2025-12-31T23:59:59Z"
+  "Body": "Trading in financial instruments involves substantial risk...",
+  "ResponseOptions": [
+    {"ResponseType": "Accepted", "RequiresUserInput": false}
+  ]
 }
 ```
 
-#### Disclaimer Response Registration
+#### Disclaimer Response Registration (DM)
 ```json
 {
-  "Token": "DM_RISK_WARNING_2025_Q1",
-  "Accepted": true,
-  "RegisteredAt": "2025-12-14T09:42:00Z"
+  "DisclaimerToken": "DM_RISK_WARNING_2025_Q1",
+  "ResponseType": "Accepted",
+  "UserInput": ""
 }
 ```
 
@@ -107,9 +118,9 @@ from typing import Optional, List, Literal
 from datetime import datetime
 from enum import Enum
 
-class DisclaimerType(Enum):
-    NORMAL = "Normal"
-    BLOCKING = "Blocking"
+class DisclaimerBlocking(Enum):
+    NON_BLOCKING = "non_blocking"
+    BLOCKING = "blocking"
 
 class DisclaimerPolicy(Enum):
     BLOCK_ALL = "block_all"  # Safe default: block on any disclaimer
@@ -118,19 +129,18 @@ class DisclaimerPolicy(Enum):
 
 @dataclass
 class DisclaimerToken:
-    """Token identifying a disclaimer requirement (from precheck)"""
+    """Token identifying a disclaimer requirement (from precheck/placement)"""
     token: str
-    # Note: Type classification comes from DM service, not precheck
+    # Note: Blocking classification comes from DM service (IsBlocking), not from precheck/placement.
 
 @dataclass
 class DisclaimerDetails:
     """Full disclaimer content and metadata"""
-    token: str
-    type: DisclaimerType
+    disclaimer_token: str
+    is_blocking: bool
     title: str
-    content: str
-    requires_response: bool
-    expires_at: Optional[datetime] = None
+    body: str
+    response_options: list[dict]
     retrieved_at: datetime = None
 
 @dataclass
@@ -198,9 +208,9 @@ class DisclaimerService:
             order_intent
         )
         
-        # Categorize disclaimers by type from DM service
-        blocking = [d for d in disclaimer_details if d.type == DisclaimerType.BLOCKING]
-        normal = [d for d in disclaimer_details if d.type == DisclaimerType.NORMAL]
+        # Categorize disclaimers using DM field IsBlocking
+        blocking = [d for d in disclaimer_details if d.is_blocking]
+        normal = [d for d in disclaimer_details if not d.is_blocking]
         
         self.logger.info(
             "Evaluating disclaimers",
@@ -219,7 +229,7 @@ class DisclaimerService:
                 "Trading blocked: Blocking disclaimers present",
                 extra={
                     "external_reference": order_intent.external_reference,
-                    "blocking_tokens": [d.token for d in blocking],
+                    "blocking_tokens": [d.disclaimer_token for d in blocking],
                     "account_key": order_intent.account_key,
                     "uic": order_intent.uic
                 }
@@ -230,18 +240,18 @@ class DisclaimerService:
                 self.logger.warning(
                     "Blocking disclaimer detail",
                     extra={
-                        "token": detail.token,
-                        "type": detail.type.value,
+                        "disclaimer_token": detail.disclaimer_token,
+                        "is_blocking": detail.is_blocking,
                         "title": detail.title,
-                        "content": detail.content[:200] + "..." if len(detail.content) > 200 else detail.content,
+                        "body": detail.body[:200] + "..." if len(detail.body) > 200 else detail.body,
                         "external_reference": order_intent.external_reference
                     }
                 )
             
             return DisclaimerResolutionOutcome(
                 allow_trading=False,
-                blocking_disclaimers=[DisclaimerToken(d.token) for d in blocking],
-                normal_disclaimers=[DisclaimerToken(d.token) for d in normal],
+                blocking_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in blocking],
+                normal_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in normal],
                 auto_accepted=[],
                 errors=[],
                 policy_applied=self.config.policy
@@ -253,7 +263,7 @@ class DisclaimerService:
                 "Trading blocked: Normal disclaimers present (policy: BLOCK_ALL)",
                 extra={
                     "external_reference": order_intent.external_reference,
-                    "normal_tokens": [d.token for d in normal],
+                    "normal_tokens": [d.disclaimer_token for d in normal],
                     "account_key": order_intent.account_key
                 }
             )
@@ -263,18 +273,18 @@ class DisclaimerService:
                 self.logger.warning(
                     "Normal disclaimer detail",
                     extra={
-                        "token": detail.token,
-                        "type": detail.type.value,
-                        "title": detail.title,
-                        "content": detail.content[:200] + "..." if len(detail.content) > 200 else detail.content,
-                        "external_reference": order_intent.external_reference
-                    }
+                    "disclaimer_token": detail.disclaimer_token,
+                    "is_blocking": detail.is_blocking,
+                    "title": detail.title,
+                    "body": detail.body[:200] + "..." if len(detail.body) > 200 else detail.body,
+                    "external_reference": order_intent.external_reference
+                }
                 )
             
             return DisclaimerResolutionOutcome(
                 allow_trading=False,
                 blocking_disclaimers=[],
-                normal_disclaimers=[DisclaimerToken(d.token) for d in normal],
+                normal_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in normal],
                 auto_accepted=[],
                 errors=[],
                 policy_applied=self.config.policy
@@ -283,7 +293,8 @@ class DisclaimerService:
         elif self.config.policy == DisclaimerPolicy.AUTO_ACCEPT_NORMAL:
             # Attempt to auto-accept normal disclaimers (pass details, not tokens)
             auto_accepted, errors = await self._auto_accept_disclaimers(
-                normal,  # List of DisclaimerDetails
+                normal,  # List[DisclaimerDetails] where IsBlocking == False
+                precheck_outcome.pre_trade_disclaimers.disclaimer_context,
                 order_intent
             )
             
@@ -301,7 +312,7 @@ class DisclaimerService:
                 return DisclaimerResolutionOutcome(
                     allow_trading=False,
                     blocking_disclaimers=[],
-                    normal_disclaimers=[DisclaimerToken(d.token) for d in normal],
+                    normal_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in normal],
                     auto_accepted=auto_accepted,
                     errors=errors,
                     policy_applied=self.config.policy
@@ -319,7 +330,7 @@ class DisclaimerService:
             return DisclaimerResolutionOutcome(
                 allow_trading=True,
                 blocking_disclaimers=[],
-                normal_disclaimers=[DisclaimerToken(d.token) for d in normal],
+                normal_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in normal],
                 auto_accepted=auto_accepted,
                 errors=[],
                 policy_applied=self.config.policy
@@ -330,7 +341,7 @@ class DisclaimerService:
                 "Trading blocked: Manual review required (policy: MANUAL_REVIEW)",
                 extra={
                     "external_reference": order_intent.external_reference,
-                    "normal_tokens": [d.token for d in normal]
+                    "normal_tokens": [d.disclaimer_token for d in normal]
                 }
             )
             
@@ -339,10 +350,10 @@ class DisclaimerService:
                 self.logger.warning(
                     "Normal disclaimer detail",
                     extra={
-                        "token": detail.token,
-                        "type": detail.type.value,
+                        "disclaimer_token": detail.disclaimer_token,
+                        "is_blocking": detail.is_blocking,
                         "title": detail.title,
-                        "content": detail.content[:200] + "..." if len(detail.content) > 200 else detail.content,
+                        "body": detail.body[:200] + "..." if len(detail.body) > 200 else detail.body,
                         "external_reference": order_intent.external_reference
                     }
                 )
@@ -350,7 +361,7 @@ class DisclaimerService:
             return DisclaimerResolutionOutcome(
                 allow_trading=False,
                 blocking_disclaimers=[],
-                normal_disclaimers=[DisclaimerToken(d.token) for d in normal],
+                normal_disclaimers=[DisclaimerToken(d.disclaimer_token) for d in normal],
                 auto_accepted=[],
                 errors=[],
                 policy_applied=self.config.policy
@@ -384,11 +395,11 @@ class DisclaimerService:
                 )
                 # On error, assume it's blocking (conservative)
                 details_list.append(DisclaimerDetails(
-                    token=token,
-                    type=DisclaimerType.BLOCKING,
+                    disclaimer_token=token,
+                    is_blocking=True,
                     title="Unknown Disclaimer",
-                    content=f"Failed to retrieve details: {str(e)}",
-                    requires_response=True,
+                    body=f"Failed to retrieve details: {str(e)}",
+                    response_options=[],
                     retrieved_at=datetime.utcnow()
                 ))
         
@@ -415,8 +426,9 @@ class DisclaimerService:
         self.logger.debug(f"Fetching disclaimer details for {token}")
         
         try:
+            # Batch endpoint uses DisclaimerTokens[]; if we do per-token fetch (fallback), still use DisclaimerTokens
             response = await self.saxo_client.get(
-                f"/dm/v2/disclaimers?Token={token}",
+                f"/dm/v2/disclaimers?DisclaimerTokens={token}",
                 timeout=self.config.retrieve_timeout
             )
             
@@ -426,12 +438,11 @@ class DisclaimerService:
             data = response.json()
             
             details = DisclaimerDetails(
-                token=data["Token"],
-                type=DisclaimerType(data["Type"]),
+                disclaimer_token=data["DisclaimerToken"],
+                is_blocking=bool(data.get("IsBlocking", True)),
                 title=data.get("Title", ""),
-                content=data.get("Content", ""),
-                requires_response=data.get("RequiresResponse", True),
-                expires_at=datetime.fromisoformat(data["ExpiresAt"].replace("Z", "+00:00")) if "ExpiresAt" in data else None,
+                body=data.get("Body", ""),
+                response_options=list(data.get("ResponseOptions", [])),
                 retrieved_at=datetime.utcnow()
             )
             
@@ -448,13 +459,14 @@ class DisclaimerService:
     async def _auto_accept_disclaimers(
         self,
         disclaimer_details: List[DisclaimerDetails],
+        disclaimer_context: str,
         order_intent: OrderIntent
     ) -> tuple[List[str], List[str]]:
         """
-        Auto-accept normal disclaimers.
+        Auto-accept non-blocking disclaimers.
         
-        CRITICAL: Only accepts disclaimers that are DisclaimerType.NORMAL.
-        Blocking disclaimers must never be auto-accepted.
+        CRITICAL: Never auto-accept when `IsBlocking == true`.
+        (Blocking disclaimers must always require manual review.)
         
         Args:
             disclaimer_details: List of DisclaimerDetails objects (already classified)
@@ -468,13 +480,13 @@ class DisclaimerService:
         
         for details in disclaimer_details:
             # DEFENSIVE CHECK: Never auto-accept blocking disclaimers
-            if details.type == DisclaimerType.BLOCKING:
-                error_msg = f"Attempted to auto-accept BLOCKING disclaimer {details.token} - BLOCKED"
+            if details.is_blocking:
+                error_msg = f"Attempted to auto-accept BLOCKING disclaimer {details.disclaimer_token} - BLOCKED"
                 self.logger.critical(
                     error_msg,
                     extra={
-                        "token": details.token,
-                        "type": details.type.value,
+                        "disclaimer_token": details.disclaimer_token,
+                        "is_blocking": details.is_blocking,
                         "external_reference": order_intent.external_reference
                     }
                 )
@@ -485,9 +497,9 @@ class DisclaimerService:
                 self.logger.info(
                     "Auto-accepting normal disclaimer",
                     extra={
-                        "token": details.token,
-                        "title": details.title,
-                        "type": details.type.value,
+                    "disclaimer_token": details.disclaimer_token,
+                    "title": details.title,
+                    "is_blocking": details.is_blocking,
                         "external_reference": order_intent.external_reference
                     }
                 )
@@ -497,19 +509,21 @@ class DisclaimerService:
                 response = await self.saxo_client.post(
                     "/dm/v2/disclaimers",
                     json={
-                        "Token": details.token,
-                        "Accepted": True
+                        "DisclaimerContext": disclaimer_context,
+                        "DisclaimerToken": details.disclaimer_token,
+                        "ResponseType": "Accepted",
+                        "UserInput": ""
                     },
                     headers={"x-request-id": request_id},
                     timeout=self.config.auto_accept_timeout
                 )
                 
                 if response.status_code >= 400:
-                    error_msg = f"HTTP {response.status_code} for token {details.token}"
+                    error_msg = f"HTTP {response.status_code} for token {details.disclaimer_token}"
                     self.logger.error(
                         "Failed to register disclaimer acceptance",
                         extra={
-                            "token": details.token,
+                            "disclaimer_token": details.disclaimer_token,
                             "http_status": response.status_code,
                             "request_id": request_id,
                             "external_reference": order_intent.external_reference
@@ -517,33 +531,33 @@ class DisclaimerService:
                     )
                     errors.append(error_msg)
                 else:
-                    accepted.append(details.token)
+                    accepted.append(details.disclaimer_token)
                     self.logger.info(
                         "Disclaimer accepted successfully",
                         extra={
-                            "token": details.token,
+                            "disclaimer_token": details.disclaimer_token,
                             "request_id": request_id,
                             "external_reference": order_intent.external_reference
                         }
                     )
                     
             except httpx.TimeoutException:
-                error_msg = f"Timeout accepting disclaimer {details.token}"
+                error_msg = f"Timeout accepting disclaimer {details.disclaimer_token}"
                 self.logger.error(
                     error_msg,
                     extra={
-                        "token": details.token,
+                        "disclaimer_token": details.disclaimer_token,
                         "external_reference": order_intent.external_reference
                     }
                 )
                 errors.append(error_msg)
                 
             except Exception as e:
-                error_msg = f"Error accepting disclaimer {details.token}: {str(e)}"
+                error_msg = f"Error accepting disclaimer {details.disclaimer_token}: {str(e)}"
                 self.logger.exception(
                     "Exception while auto-accepting disclaimer",
                     extra={
-                        "token": details.token,
+                        "disclaimer_token": details.disclaimer_token,
                         "external_reference": order_intent.external_reference
                     }
                 )
@@ -615,7 +629,7 @@ class TradeExecutor:
             
             if disclaimer_outcome.normal_disclaimers:
                 tokens = [d.token for d in disclaimer_outcome.normal_disclaimers]
-                error_parts.append(f"Normal disclaimers: {', '.join(tokens)}")
+                error_parts.append(f"Non-blocking disclaimers: {', '.join(tokens)}")
             
             if disclaimer_outcome.errors:
                 error_parts.append(f"Errors: {', '.join(disclaimer_outcome.errors)}")
@@ -733,12 +747,10 @@ config = DisclaimerConfig(
   "timestamp": "2025-12-14T09:42:01Z",
   "level": "WARNING",
   "message": "Disclaimer details",
-  "token": "DM_REGULATORY_NOTICE_EU",
-  "type": "Blocking",
+  "disclaimer_token": "DM_REGULATORY_NOTICE_EU",
+  "is_blocking": true,
   "title": "EU Regulatory Notice",
-  "content": "This instrument is subject to special regulatory requirements...",
-  "requires_response": true,
-  "expires_at": "2025-12-31T23:59:59Z",
+  "body": "This instrument is subject to special regulatory requirements...",
   "external_reference": "BOT_BUY_AAPL_20251214_094200"
 }
 ```
@@ -789,15 +801,15 @@ TRADING TRADING    TRADING    TRADING
 ```
 
 ## Acceptance Criteria
-1. If precheck returns `PreTradeDisclaimers`, executor does not place the order unless the configured policy allows it.
-2. Default behavior is safe: executor logs and returns a "blocked_by_disclaimer" outcome.
-3. The system can fetch disclaimer details for the provided tokens.
+1. If precheck or placement returns `PreTradeDisclaimers`, executor does not place / does not retry the order unless the configured policy allows it.
+2. Default behavior is safe: executor logs and returns a `blocked_by_disclaimer` outcome.
+3. The system can fetch DM disclaimer details using `GET /dm/v2/disclaimers?DisclaimerTokens=...`.
 4. If configured for auto-accept:
-   - Only "normal" disclaimers are accepted automatically.
-   - Blocking disclaimers always block trading with an explicit log entry.
+   - Auto-accept is attempted **only** when `IsBlocking == false`.
+   - **Never auto-accept** when `IsBlocking == true`.
 5. Disclaimer tokens and handling outcomes are logged with correlation fields:
    `{external_reference, request_id, account_key, asset_type, uic}`.
-6. Disclaimer details (title, content) are logged for operator review when trading is blocked.
+6. Disclaimer details (title, body) are logged for operator review when trading is blocked.
 
 ## Implementation Notes
 - Disclaimer logic should be isolated so it can be unit-tested independently from precheck/placement.
@@ -832,19 +844,21 @@ TRADING TRADING    TRADING    TRADING
 ## Critical Implementation Notes
 
 ### Disclaimer Classification Flow
-1. **Precheck returns `DisclaimerTokens`** (array of strings, NO type classification)
-2. **Fetch DM details** using GET `/dm/v2/disclaimers?tokens={token}` for each token
-3. **DM response contains `Type`** field: "Normal" or "Blocking"
-4. **Classify** disclaimers based on DM response, not precheck payload
+1. **Precheck / placement returns `PreTradeDisclaimers`** with:
+   - `DisclaimerContext: string`
+   - `DisclaimerTokens: string[]`
+2. **Fetch DM details** using `GET /dm/v2/disclaimers?DisclaimerTokens=...` (batch).
+3. **DM response contains `IsBlocking: bool`**.
+4. **Classify** disclaimers based on `IsBlocking` (not from precheck).
 5. **Auto-accept logic** must:
-   - Only accept tokens classified as "Normal" by DM service
-   - Never accept "Blocking" disclaimers (defensive check enforced)
-   - Log critical error if attempt to auto-accept blocking disclaimer occurs
+   - Only accept when `IsBlocking == false`.
+   - Never accept when `IsBlocking == true`.
+   - Log a CRITICAL event if code ever attempts to accept a blocking disclaimer.
 
 ### Defensive Programming
-The auto-accept function receives DisclaimerDetails objects (already classified), but includes a defensive check:
+The auto-accept function receives `DisclaimerDetails` objects (already classified via `IsBlocking`), but includes a defensive check:
 ```python
-if details.type == DisclaimerType.BLOCKING:
+if details.is_blocking:
     # Log critical error and refuse
     errors.append("Attempted to auto-accept BLOCKING disclaimer")
     continue

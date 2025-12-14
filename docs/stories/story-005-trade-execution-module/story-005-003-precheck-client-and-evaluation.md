@@ -43,7 +43,7 @@ x-request-id: {uuid}
   "OrderDuration": {
     "DurationType": "DayOrder"
   },
-  "FieldGroups": ["Costs", "MarginImpact"]
+  "FieldGroups": ["Costs", "MarginImpactBuySell"]
 }
 ```
 
@@ -56,7 +56,7 @@ x-request-id: {uuid}
     "Amount": 1234.56,
     "Currency": "USD"
   },
-  "MarginImpact": {
+  "MarginImpactBuySell": {
     "Amount": 500.00,
     "Currency": "USD"
   },
@@ -81,11 +81,7 @@ x-request-id: {uuid}
 {
   "PreCheckResult": "Ok",
   "PreTradeDisclaimers": {
-    "DisclaimerContext": {
-      "ContextType": "OrderPrecheck",
-      "AccountKey": "Gv1B3n...",
-      "Uic": 211
-    },
+    "DisclaimerContext": "OrderPrecheck",
     "DisclaimerTokens": [
       "DM_RISK_WARNING_2025_Q1",
       "DM_REGULATORY_NOTICE_EU"
@@ -113,21 +109,14 @@ class EstimatedCost:
     currency: str
 
 @dataclass
-class MarginImpact:
+class MarginImpactBuySell:
     amount: Decimal
     currency: str
 
 @dataclass
-class DisclaimerContext:
-    """Context information for disclaimers"""
-    context_type: str  # "OrderPrecheck", "OrderPlacement", etc.
-    account_key: str
-    uic: int
-    
-@dataclass
 class PreTradeDisclaimers:
-    """Pre-trade disclaimer data from precheck response"""
-    disclaimer_context: DisclaimerContext
+    """Pre-trade disclaimer data from precheck/placement response"""
+    disclaimer_context: str
     disclaimer_tokens: List[str]  # List of disclaimer token strings
 
 @dataclass
@@ -135,7 +124,7 @@ class PrecheckOutcome:
     ok: bool
     error_info: Optional[ErrorInfo] = None
     estimated_cost: Optional[EstimatedCost] = None
-    margin_impact: Optional[MarginImpact] = None
+    margin_impact_buy_sell: Optional[MarginImpactBuySell] = None
     pre_trade_disclaimers: Optional[PreTradeDisclaimers] = None
     http_status: int = 200
     request_id: Optional[str] = None
@@ -332,9 +321,15 @@ class PrecheckClient:
                 currency=data["EstimatedCost"]["Currency"]
             )
         
-        margin_impact = None
-        if "MarginImpact" in data:
-            margin_impact = MarginImpact(
+        margin_impact_buy_sell = None
+        if "MarginImpactBuySell" in data:
+            margin_impact_buy_sell = MarginImpactBuySell(
+                amount=Decimal(str(data["MarginImpactBuySell"]["Amount"])),
+                currency=data["MarginImpactBuySell"]["Currency"]
+            )
+        # Defensive fallback for older/alternate shapes
+        elif "MarginImpact" in data:
+            margin_impact_buy_sell = MarginImpactBuySell(
                 amount=Decimal(str(data["MarginImpact"]["Amount"])),
                 currency=data["MarginImpact"]["Currency"]
             )
@@ -342,14 +337,9 @@ class PrecheckClient:
         disclaimers = None
         if "PreTradeDisclaimers" in data:
             ptd = data["PreTradeDisclaimers"]
-            context = DisclaimerContext(
-                context_type=ptd.get("DisclaimerContext", {}).get("ContextType", "OrderPrecheck"),
-                account_key=ptd.get("DisclaimerContext", {}).get("AccountKey", order_intent.account_key),
-                uic=ptd.get("DisclaimerContext", {}).get("Uic", order_intent.uic)
-            )
             disclaimers = PreTradeDisclaimers(
-                disclaimer_context=context,
-                disclaimer_tokens=ptd.get("DisclaimerTokens", [])
+                disclaimer_context=str(ptd.get("DisclaimerContext", "")),
+                disclaimer_tokens=list(ptd.get("DisclaimerTokens", []))
             )
         
         # Success!
@@ -361,14 +351,14 @@ class PrecheckClient:
                 "uic": order_intent.uic,
                 "external_reference": order_intent.external_reference,
                 "estimated_cost": estimated_cost.amount if estimated_cost else None,
-                "has_disclaimers": disclaimers is not None and len(disclaimers) > 0
+                "has_disclaimers": disclaimers is not None and len(disclaimers.disclaimer_tokens) > 0
             }
         )
         
         return PrecheckOutcome(
             ok=True,
             estimated_cost=estimated_cost,
-            margin_impact=margin_impact,
+            margin_impact_buy_sell=margin_impact_buy_sell,
             pre_trade_disclaimers=disclaimers,
             http_status=http_status,
             request_id=request_id,
@@ -515,17 +505,22 @@ async def execute_precheck_with_retry(
 ## Critical Schema Notes
 
 ### PreTradeDisclaimers Structure
-Per Saxo's breaking-change documentation, the precheck response contains:
-- `DisclaimerContext`: Object with context information (ContextType, AccountKey, Uic)
-- `DisclaimerTokens`: Array of strings (not objects with Type field)
-- Classification into "Normal" vs "Blocking" comes from fetching DM disclaimer details (Story 005-005), NOT from the precheck payload
-- Do NOT assume a "Type" field exists in the precheck response
+Per Saxo referencedocs / release notes, the precheck (and now also placement error responses) use:
+- `DisclaimerContext`: **string**
+- `DisclaimerTokens`: **string[]**
+
+Notes:
+- There is **no per-disclaimer object** (no `{Token, Type}` structure) in precheck.
+- Classification into “blocking vs non-blocking” comes from DM disclaimer details (Story 005-005), not from precheck.
+- Treat unknown/extra fields as ignorable.
 
 ### FieldGroups Specification
 Per Saxo precheck API documentation, use:
-- `"Costs"`: Returns estimated cost fields
-- `"MarginImpactBuySell"`: Returns margin impact (NOT "MarginImpact")
-- Verify actual field names against primary source docs to prevent "passes in DRY_RUN but fails in SIM" issues
+- `"Costs"`: returns estimated cost fields
+- `"MarginImpactBuySell"`: returns margin impact fields
+
+Defensive parsing:
+- If Saxo returns legacy/alternate `MarginImpact`, parse it as `margin_impact_buy_sell` (fallback) and log at DEBUG.
 
 ## Primary Sources
 - https://www.developer.saxo/openapi/referencedocs/trade/v2/orders/post__trade__precheck
