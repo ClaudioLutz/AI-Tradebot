@@ -43,8 +43,22 @@ def test_execution_dry_run(mock_saxo_client, order_intent):
             result = executor.execute(order_intent, dry_run=True)
 
             assert result.status == ExecutionStatus.DRY_RUN
-            assert result.order_id == "DRY_RUN_ID"
+            # In strict DRY_RUN, order_id is None because placement client is not called
+            assert result.order_id is None
+
             # Verify placement was NOT called (mock client post not called for order)
+            # We can verify that no POST /trade/v2/orders happened
+            # mock_saxo_client is the raw client now.
+            # It might have been called for validation (GET) or Precheck (POST precheck)
+            # We check that it wasn't called for POST /orders
+
+            calls = mock_saxo_client.post.call_args_list
+            for call in calls:
+                args, kwargs = call
+                # Check first arg (url)
+                if len(args) > 0:
+                    url = args[0]
+                    assert "/trade/v2/orders" != url and "/trade/v2/orders/" not in url or "precheck" in url
 
 def test_execution_success(mock_saxo_client, order_intent):
     """Test successful execution in SIM mode"""

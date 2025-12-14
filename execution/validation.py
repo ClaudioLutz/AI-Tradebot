@@ -224,7 +224,7 @@ class InstrumentValidator:
         # Saxo usually provides it. If missing, assume True but log?
         # Code used to default to True.
         if is_tradable is None:
-            is_tradable = True
+            is_tradable = False # Fail-closed
 
         # Market State
         market_state_str = None

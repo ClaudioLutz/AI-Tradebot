@@ -33,69 +33,24 @@ class PrecheckClient:
         return self._execute_precheck_with_retry(order_intent)
 
     def _execute_precheck_with_retry(self, order_intent: OrderIntent) -> PrecheckResult:
-        """Execute precheck with retry logic for transient failures and rate limits"""
-        last_result = None
-
-        for attempt in range(self.retry_config.max_retries + 1):
-            try:
-                result = self._perform_single_precheck(order_intent)
-                last_result = result
-
-                if result.success:
-                    return result
-
-                # If failure is not retryable (e.g. validation error), return immediately
-                # How to detect transient vs permanent?
-                # PrecheckResult doesn't have http_status.
-                # We need to rely on exception handling in _perform_single_precheck to catch HTTP errors.
-                # If _perform_single_precheck returns a failed result, it's likely a business logic error (200 OK with ErrorInfo).
-                return result
-
-            except Exception as e:
-                # Check for HTTP error status
-                status_code = getattr(e, "status_code", 500)
-
-                # Rate Limiting (429)
-                if status_code == 429:
-                    reset_time = 1.0
-                    if hasattr(e, "response") and e.response and "X-RateLimit-SessionOrders-Reset" in e.response.headers:
-                        try:
-                            reset_time = float(e.response.headers["X-RateLimit-SessionOrders-Reset"])
-                        except ValueError:
-                            pass
-
-                    if attempt < self.retry_config.max_retries:
-                        self.logger.warning(f"Rate limited (429). Retrying after {reset_time}s")
-                        time.sleep(reset_time)
-                        continue
-                    else:
-                        return PrecheckResult(
-                            success=False,
-                            error_message="Rate limit exceeded after retries",
-                            error_code="RATE_LIMIT"
-                        )
-
-                # Other retryable errors
-                if status_code in self.retry_config.retry_on_status:
-                    if attempt < self.retry_config.max_retries:
-                        backoff = self.retry_config.backoff_base_seconds * (2 ** attempt)
-                        self.logger.warning(f"Transient error {status_code}. Retrying after {backoff}s")
-                        time.sleep(backoff)
-                        continue
-
-                # Non-retryable or max retries reached
-                return PrecheckResult(
-                    success=False,
-                    error_message=str(e),
-                    error_code=f"HTTP_{status_code}"
-                )
-
-        return last_result or PrecheckResult(success=False, error_message="Unknown error")
+        """Execute precheck. SaxoClient handles retries for network/rate limits."""
+        try:
+            return self._perform_single_precheck(order_intent)
+        except Exception as e:
+            status_code = getattr(e, "status_code", 500)
+            return PrecheckResult(
+                success=False,
+                error_message=str(e),
+                error_code=f"HTTP_{status_code}"
+            )
 
     def _perform_single_precheck(self, order_intent: OrderIntent) -> PrecheckResult:
         """
         Execute a single precheck attempt.
         """
+        # If request_id is present in intent, use it. Otherwise generate one.
+        # Note: We do NOT update intent.request_id here, as that should be done by executor if needed.
+        # But we must capture what we used.
         request_id = order_intent.request_id if order_intent.request_id else str(uuid.uuid4())
 
         # Use utils to build payload correctly (including OrderType etc.)
@@ -114,10 +69,13 @@ class PrecheckClient:
         response_data = self.saxo_client.post(
             "/trade/v2/orders/precheck",
             json_body=payload,
-            headers=headers
+            headers=headers,
+            endpoint_type="orders" # Use same rate limit bucket as orders? or default? Story says order rate limits apply.
         )
 
-        return self._parse_precheck_response(response_data)
+        result = self._parse_precheck_response(response_data)
+        result.request_id = request_id
+        return result
 
     def _parse_precheck_response(self, data: dict) -> PrecheckResult:
         """

@@ -8,69 +8,7 @@ from execution.models import OrderIntent, ExecutionResult, ExecutionStatus, Orde
 
 logger = logging.getLogger(__name__)
 
-class RateLimitedSaxoClient:
-    """
-    Wrapper around Saxo client to handle Rate Limiting (429).
-    Respects X-RateLimit-SessionOrders-Reset and other headers.
-    """
-    def __init__(self, client):
-        self.client = client
-        self.max_retries = 3
-        self.default_reset_seconds = 1.0
-
-    def _handle_request(self, method, url, **kwargs):
-        for attempt in range(self.max_retries + 1):
-            try:
-                # Delegate to inner client
-                if method == "GET":
-                    return self.client.get(url, **kwargs)
-                elif method == "POST":
-                    return self.client.post(url, **kwargs)
-                elif method == "PUT":
-                    return self.client.put(url, **kwargs)
-                elif method == "DELETE":
-                    return self.client.delete(url, **kwargs)
-                else:
-                    raise ValueError(f"Unsupported method {method}")
-            except Exception as e:
-                status_code = getattr(e, "status_code", 500)
-
-                if status_code == 429:
-                    # Check for reset header
-                    reset_time = self.default_reset_seconds
-                    if hasattr(e, "response") and e.response:
-                        headers = getattr(e.response, "headers", {})
-                        # Saxo headers for session limits
-                        if "X-RateLimit-SessionOrders-Reset" in headers:
-                             try:
-                                 reset_time = float(headers["X-RateLimit-SessionOrders-Reset"])
-                             except ValueError:
-                                 pass
-                        elif "Retry-After" in headers:
-                            try:
-                                reset_time = float(headers["Retry-After"])
-                            except ValueError:
-                                pass
-
-                    if attempt < self.max_retries:
-                        logger.warning(f"Rate limited (429). Retrying after {reset_time:.2f}s")
-                        time.sleep(reset_time)
-                        continue
-
-                # Re-raise other errors or if max retries reached
-                raise e
-
-    def get(self, url, params=None, headers=None):
-        return self._handle_request("GET", url, params=params, headers=headers)
-
-    def post(self, url, json_body=None, headers=None):
-        return self._handle_request("POST", url, json_body=json_body, headers=headers)
-
-    def put(self, url, json_body=None, headers=None):
-        return self._handle_request("PUT", url, json_body=json_body, headers=headers)
-
-    def delete(self, url, params=None, headers=None):
-        return self._handle_request("DELETE", url, params=params, headers=headers)
+# RateLimitedSaxoClient removed - functionality moved to SaxoClient
 
 def generate_external_reference(strategy_id: str, asset_type: str, uic: int) -> str:
     """

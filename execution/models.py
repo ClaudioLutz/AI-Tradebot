@@ -92,6 +92,9 @@ class PrecheckResult:
     disclaimer_context: Optional[str] = None
     has_blocking_disclaimers: bool = False
 
+    # Traceability
+    request_id: Optional[str] = None
+
     # Raw response for debugging
     raw_response: Optional[dict] = None
 
@@ -117,6 +120,7 @@ class ExecutionResult:
 
     # Saxo order details (when placed)
     order_id: Optional[str] = None  # Saxo OrderId
+    request_id: Optional[str] = None # Trace ID used
 
     # Error details
     error_message: Optional[str] = None
