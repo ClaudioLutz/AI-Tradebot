@@ -96,6 +96,15 @@ class SaxoTradeExecutor(TradeExecutor):
         5. Placement (if not dry_run)
         6. Reconciliation (if needed)
         """
+        # Ensure external reference is set (2.2)
+        if not intent.external_reference:
+            from execution.utils import generate_external_reference
+            intent.external_reference = generate_external_reference(
+                strategy_id=intent.strategy_id or "UNKNOWN",
+                asset_type=intent.asset_type.value,
+                uic=intent.uic
+            )
+
         logger.info(
             f"Starting execution for {intent.external_reference}",
             extra={
@@ -204,12 +213,21 @@ class SaxoTradeExecutor(TradeExecutor):
         if dry_run:
             status = ExecutionStatus.DRY_RUN
 
+        # Safely extract error message (1.2)
+        error_msg = None
+        if execution_outcome.placement and execution_outcome.placement.error_info:
+            err_info = execution_outcome.placement.error_info
+            if isinstance(err_info, dict):
+                error_msg = err_info.get("Message", str(err_info))
+            else:
+                error_msg = getattr(err_info, "message", str(err_info))
+
         return ExecutionResult(
             status=status,
             order_intent=intent,
             # precheck_result=..., # map if needed
             order_id=execution_outcome.order_id,
-            error_message=execution_outcome.placement.error_info.message if execution_outcome.placement.error_info else None,
+            error_message=error_msg,
             timestamp=execution_outcome.timestamp.isoformat() if execution_outcome.timestamp else datetime.utcnow().isoformat(),
             needs_reconciliation=(execution_outcome.final_status == "uncertain")
         )
@@ -217,22 +235,15 @@ class SaxoTradeExecutor(TradeExecutor):
     def reconcile_order(self, order_id: str, external_reference: str, client_key: str = None) -> dict:
         """
         Query order status from portfolio for reconciliation.
-        Using OrderPlacementClient's internal logic might be better if exposed,
-        or use client directly.
-        
-        The TradeExecutor interface defines this method.
         """
-        # We can reuse OrderPlacementClient's reconcile logic if we expose it or copy it.
-        # Or just use the client directly here.
-        
         client_key = client_key or self.client_key
         
-        # This matches _reconcile_by_order_id in placement.py
+        # Use direct lookup endpoint matching placement reconciliation (2.4)
         try:
-            response = self.client.get(
-                "/port/v1/orders",
-                params={"ClientKey": client_key, "OrderId": order_id}
-            )
+            # Endpoint: /port/v1/orders/{ClientKey}/{OrderId}
+            url = f"/port/v1/orders/{client_key}/{order_id}"
+
+            response = self.client.get(url)
             # Assuming client returns dict/json
             data = response if isinstance(response, dict) else response.json()
             return data

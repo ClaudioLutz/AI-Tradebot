@@ -192,9 +192,23 @@ def create_execution_log_context(intent: OrderIntent, result: ExecutionResult) -
 
     return {k: v for k, v in context.items() if v is not None}
 
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (float, int)):
+            return super().default(obj)
+        if hasattr(obj, '__float__'): # Covers Decimal
+            return float(obj)
+        return super().default(obj)
+
 def log_execution(intent: OrderIntent, result: ExecutionResult, logger: logging.Logger):
     """Log execution with structured context"""
     context = create_execution_log_context(intent, result)
 
     log_level = logging.INFO if result.status == ExecutionStatus.SUCCESS else logging.WARNING
-    logger.log(log_level, f"Execution {result.status.value}", extra={"context": json.dumps(context)})
+    # Serialize with Decimal support (1.3)
+    try:
+        context_json = json.dumps(context, cls=DecimalEncoder)
+    except Exception:
+        context_json = str(context)
+
+    logger.log(log_level, f"Execution {result.status.value}", extra={"context": context_json})

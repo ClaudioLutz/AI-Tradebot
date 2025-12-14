@@ -101,24 +101,24 @@ class OrderPlacementClient:
             )
 
         except Exception as e:
-            # Handle failure or uncertainty
-            self.logger.error(f"Placement failed/uncertain for {intent.external_reference}: {e}")
+            # Handle failure vs uncertainty (2.3)
+            self.logger.error(f"Placement error for {intent.external_reference}: {e}")
 
-            # Check for TradeNotCompleted (Saxo specific logic)
-            # If we got a response with TradeNotCompleted, or a timeout?
-            # If it's a timeout, status is uncertain.
-            # If it's a 4xx, likely failure.
+            # If we can determine it's a definitive failure (e.g. 4xx), return failure immediately
+            status_code = getattr(e, "status_code", None)
 
-            # We assume exception might wrap response or status.
+            # SaxoAPIError has status_code. 400-499 are client errors (failed).
+            # 429 is rate limit (failed or uncertain? failed usually as not accepted)
+            # 500+ or Timeout are uncertain.
 
-            # If we have an OrderId in the exception/response (rare), or if we simply timed out,
-            # we must reconcile if there's any chance it went through.
-            # But without an OrderId we can only scan by ExternalReference.
+            if status_code and 400 <= status_code < 500 and status_code != 408:
+                # Definitive failure
+                return ExecutionOutcome(
+                    final_status="failure",
+                    placement=PlacementStatus(http_status=status_code, error_info={"Message": str(e)})
+                )
 
-            # "TradeNotCompleted" usually comes as a 200 OK with ErrorInfo?
-            # Or 400? Saxo docs say TradeNotCompleted might return OrderId if partial/queued?
-
-            # If we don't have OrderId, we try to find it.
+            # Otherwise treat as uncertain and reconcile
             return self._reconcile_placement(intent, request_id, error=e)
 
     def _reconcile_placement(self, intent: OrderIntent, request_id: str, error: Exception) -> ExecutionOutcome:

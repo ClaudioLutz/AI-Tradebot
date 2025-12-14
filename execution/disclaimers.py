@@ -290,11 +290,20 @@ class DisclaimerService:
 
             # CHECK 2: Response Options
             # We look for a simple "Accepted" option.
-            # If multiple options exist, we need to be sure "Accepted" is the intended one and no user choice is implicitly required (like "Dismissed" vs "Accepted").
             # Saxo policy: If user input/conditions required, we can't auto-accept.
             # ResponseOptions usually contains valid values for ResponseType.
 
-            valid_responses = [opt.get("Value") for opt in details.response_options]
+            # Handle both "Value" and key-based ResponseType (2.5)
+            # ResponseOptions example: [{"ResponseType": "Accepted", ...}]
+            # Or dictionary with keys? Assuming list of dicts.
+
+            valid_responses = []
+            for opt in details.response_options:
+                # Check for ResponseType or Value
+                if "ResponseType" in opt:
+                    valid_responses.append(opt["ResponseType"])
+                elif "Value" in opt:
+                    valid_responses.append(opt["Value"])
 
             if "Accepted" not in valid_responses:
                 errors.append(f"Disclaimer {details.disclaimer_token} does not offer 'Accepted' response option. Options: {valid_responses}")
