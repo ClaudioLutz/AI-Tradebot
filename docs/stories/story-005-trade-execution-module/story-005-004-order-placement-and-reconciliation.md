@@ -6,19 +6,20 @@ Place market orders in SIM after a successful precheck, and reconcile uncertain 
 ## Background / Context
 Order placement can be subject to timeouts or uncertain status, especially on exchange-based products.
 Saxo explicitly documents the `TradeNotCompleted` scenario and recommends querying the portfolio using the returned OrderId (when present).
-Additionally, duplicate order protections and rate limiting must be respected.
+Additionally, `ExternalReference` is provided by the client but NOT checked for uniqueness by the Saxo server. This places the burden of duplicate prevention on the client logic.
 
 ## Scope
 In scope:
-- Implement POST /trade/v2/orders for market orders (Stock + FxSpot) in SIM.
+- Implement POST /trade/v2/orders for market orders (Stock + FxSpot/FxCrypto) in SIM.
 - Use `external_reference` and `x-request-id`.
 - Handle outcomes:
   - Success with OrderId
   - Failure with ErrorInfo
   - Timeout / TradeNotCompleted → run reconciliation logic:
     - if OrderId present → query Portfolio open orders by OrderId
-    - else → query open orders filtered by ExternalReference (if present in order response model in portfolio) OR fall back to time-window logging-only
+    - else → **SCAN** open orders filtered by ExternalReference (last-ditch effort since OrderId is unknown)
 - Ensure DRY_RUN never places orders.
+- Strict adherence to `ManualOrder` and `DayOrder` constraints.
 
 ## Technical Details
 
@@ -46,7 +47,7 @@ Authorization: Bearer {access_token}
 {
   "AccountKey": "string",
   "Amount": number,
-  "AssetType": "Stock" | "FxSpot",
+  "AssetType": "Stock" | "FxSpot" | "FxCrypto",
   "BuySell": "Buy" | "Sell",
   "ManualOrder": false,
   "OrderType": "Market",
@@ -249,7 +250,8 @@ class OrderPlacementClient:
                     "uic": order_intent.uic,
                     "external_reference": order_intent.external_reference,
                     "buy_sell": order_intent.buy_sell,
-                    "amount": order_intent.amount
+                    "amount": order_intent.amount,
+                    "manual_order": payload["ManualOrder"]
                 }
             )
             
@@ -323,12 +325,13 @@ class OrderPlacementClient:
     
     def _build_order_payload(self, order_intent: OrderIntent) -> dict:
         """Build Saxo order placement payload"""
+        # Note: DayOrder is strictly required for Market orders
         return {
             "AccountKey": order_intent.account_key,
             "Amount": float(order_intent.amount),
             "AssetType": order_intent.asset_type,
             "BuySell": order_intent.buy_sell,
-            "ManualOrder": False,
+            "ManualOrder": order_intent.manual_order,
             "OrderType": "Market",
             "Uic": order_intent.uic,
             "ExternalReference": order_intent.external_reference,
@@ -479,9 +482,9 @@ class OrderPlacementClient:
         
         Strategy:
         1. If OrderId available: query by OrderId (most reliable)
-        2. Else: rely on LOCAL STATE first (did we get a 201/202?).
-        3. Last ditch: query by ClientKey + Status=All (scan for ExternalReference)
-           - Note: This is non-contractual and best-effort.
+        2. If OrderId missing (timeout before response): SCAN portfolio for ExternalReference.
+           - This is critical because the Saxo server does NOT prevent duplicates.
+           - We must verify if our previous attempt made it through.
         """
         
         self.logger.info(
@@ -498,12 +501,11 @@ class OrderPlacementClient:
             if placement_outcome.order_id:
                 return await self._reconcile_by_order_id(
                     placement_outcome.order_id,
-                    order_intent.external_reference
+                    order_intent.external_reference,
+                    order_intent.client_key
                 )
             
-            # Strategy 2: Query by AccountKey + ExternalReference
-            # This is expensive and not guaranteed to return ExternalReference in all views,
-            # but is the only option if OrderId is missing.
+            # Strategy 2: Scan by ClientKey + ExternalReference
             return await self._reconcile_by_external_reference(
                 order_intent.client_key,
                 order_intent.external_reference
@@ -797,11 +799,13 @@ SUCCESS  FAILURE SUCCESS  FAILURE  UNCERTAIN
 5. Placement is never attempted if precheck failed or disclaimers policy blocks the trade.
 6. If placement fails and returns `PreTradeDisclaimers`, the executor captures and logs them (same shape as precheck: `DisclaimerContext: string`, `DisclaimerTokens: string[]`) so operators can resolve via the DM flow.
 7. DRY_RUN mode logs but never executes actual placement.
+8. **Market Orders** strictly use `DayOrder` duration.
+9. `ManualOrder` is set correctly in payload.
 
 ## Implementation Notes
 - Prefer `OrderDuration.DurationType = DayOrder` for Market orders unless there is a strategy-level override.
 - Ensure the body uses the Saxo field names exactly (AccountKey, Amount, BuySell, OrderType, Uic, AssetType, OrderDuration, ExternalReference, ManualOrder).
-- Build reconciliation around `GET /port/v1/orders` using `OrderId` filter.
+- Build reconciliation around `GET /port/v1/orders`.
 - Keep reconciliation bounded (e.g., single query, then mark unknown; do not loop indefinitely).
 - Use `x-request-id` header for all placement requests to enable request tracing.
 - Placement can fail with `PreTradeDisclaimers` (per Saxo release notes). Treat that as a *hard block* unless disclaimer policy resolves them (Story 005-005).

@@ -1,37 +1,39 @@
 # Story 005-006: Position query and position-aware execution guards
 
 ## Summary
-Implement the minimal position model and guardrails required by Epic 005: prevent duplicate buys (or warn), and ensure sells only occur when a position exists.
+Implement the minimal position model and guardrails required by Epic 005: prevent duplicate buys (or warn), and ensure sells only occur when a position exists. This story prioritizes **NetPositions** as the source of truth to avoid gross exposure fallacies.
 
 ## Background / Context
 Epic 005 requires sell orders to be position-aware: only sell if there is an existing position.
 Additionally, the module should prevent duplicate buys (or at least log a warning), to avoid repeatedly
 increasing exposure on repeated buy signals.
+Research confirms that **NetPositions** are the correct entity for exposure monitoring, as they automatically handle Saxo's Intraday vs End-of-Day netting logic.
 
 ## Scope
 In scope:
-- Implement position query via Portfolio Positions endpoints.
+- Implement position query via **NetPositions** endpoint (`/port/v1/netpositions`).
 - Normalize positions into a simple in-memory view keyed by `(AssetType, Uic)`:
   - quantity (net)
   - side (long/short if applicable; default assume long-only strategy)
   - account_key association
 - Implement guards:
   - Buy intent:
-    - if position already exists (net amount > 0), skip placement (or configurable “warn only”).
+    - if NetPosition already exists (net amount > 0), skip placement (or configurable “warn only”).
   - Sell intent:
-    - if no position exists, skip placement.
+    - if no NetPosition exists, skip placement.
     - amount for sell is either:
       - configured fixed quantity, or
       - “close full position” (default safe option for strategies emitting exit signals).
 
 ## Acceptance Criteria
-1. Executor can query positions for the configured account and identify net position per instrument.
-2. Buy guard:
+1. Executor queries `/port/v1/netpositions` using `ClientKey` context to get a consolidated view, or `AccountKey` if granular view is needed.
+2. Query strictly includes `FieldGroups=NetPositionBase,NetPositionView` to ensure critical P&L and exposure fields are returned.
+3. Buy guard:
    - If a net long position exists, executor does not place an additional buy by default, and logs `duplicate_buy_prevented`.
-3. Sell guard:
-   - If no position exists, executor does not precheck/place the sell and logs `no_position_to_sell`.
-4. Position query failures are handled gracefully and do not crash the orchestration loop.
-5. Works for both Stock and FxSpot positions in SIM.
+4. Sell guard:
+   - If no NetPosition exists, executor does not precheck/place the sell and logs `no_position_to_sell`.
+5. Position query failures are handled gracefully and do not crash the orchestration loop.
+6. Works for `Stock`, `FxSpot`, and `FxCrypto` positions in SIM.
 
 ## Technical Architecture
 
@@ -40,7 +42,7 @@ In scope:
 @dataclass
 class Position:
     """Normalized position representation"""
-    asset_type: str  # "Stock", "FxSpot", etc.
+    asset_type: str  # "Stock", "FxSpot", "FxCrypto"
     uic: int
     account_key: str
     position_id: str
@@ -64,12 +66,12 @@ class PositionGuardResult:
 
 ### API Endpoints
 
-#### Net Positions (Recommended)
+#### Net Positions (Primary Source)
 ```http
 GET /port/v1/netpositions?ClientKey={ClientKey}&FieldGroups=NetPositionBase,NetPositionView
 ```
 
-> **Important**: Use `ClientKey`, not `AccountKey`, for this endpoint.
+> **Critical**: Use `ClientKey` to aggregate exposure across all sub-accounts (Consolidated View) or `AccountKey` for specific ledger view. For the trade executor, `ClientKey` is generally safer to prevent trading against oneself in different sub-accounts.
 
 **Response Structure:**
 ```json
@@ -77,7 +79,7 @@ GET /port/v1/netpositions?ClientKey={ClientKey}&FieldGroups=NetPositionBase,NetP
   "Data": [
     {
       "NetPositionId": "212345678",
-      "PositionBase": {
+      "NetPositionBase": {
         "AccountId": "9073654",
         "Amount": 100.0,
         "AssetType": "Stock",
@@ -95,11 +97,6 @@ GET /port/v1/netpositions?ClientKey={ClientKey}&FieldGroups=NetPositionBase,NetP
     }
   ]
 }
-```
-
-#### Individual Positions
-```http
-GET /port/v1/positions?ClientKey={ClientKey}&FieldGroups=PositionBase,PositionView
 ```
 
 ### Position Query Implementation
@@ -130,7 +127,7 @@ class PositionManager:
             return self._position_cache
             
         try:
-            # Bug fix: ClientKey must be used for NetPositions, NOT AccountKey
+            # Query NetPositions with mandatory FieldGroups
             response = await self.client.get(
                 "/port/v1/netpositions",
                 params={
@@ -141,14 +138,14 @@ class PositionManager:
             
             positions = {}
             for item in response.get("Data", []):
-                pos_base = item.get("PositionBase", {})
+                pos_base = item.get("NetPositionBase", {})
                 pos_view = item.get("NetPositionView", {})
                 
                 key = (pos_base["AssetType"], pos_base["Uic"])
                 positions[key] = Position(
                     asset_type=pos_base["AssetType"],
                     uic=pos_base["Uic"],
-                    account_key=pos_base.get("AccountKey"), # Use AccountKey (GUID), not AccountId (Display)
+                    account_key=pos_base.get("AccountKey"),
                     position_id=item["NetPositionId"],
                     net_quantity=Decimal(str(pos_base.get("Amount", 0))),
                     average_price=Decimal(str(pos_view.get("AverageOpenPrice", 0))),
@@ -164,7 +161,7 @@ class PositionManager:
             logger.info(
                 "positions_refreshed",
                 count=len(positions),
-                account_key=self.account_key
+                client_key=self.client_key
             )
             
             return positions
@@ -173,7 +170,7 @@ class PositionManager:
             logger.error(
                 "position_query_failed",
                 error=str(e),
-                account_key=self.account_key
+                client_key=self.client_key
             )
             # Return cached data if available, otherwise empty dict
             return self._position_cache if self._position_cache else {}
@@ -462,7 +459,7 @@ async def safe_position_check(
 ```
 
 ## Implementation Notes
-- Prefer NetPositions if you want a consolidated view; Positions can include multiple legs/lots.
+- **NetPositions over Positions**: NetPositions provide the rolled-up view of exposure, which is what we care about for "Do I have a position?" logic. It correctly handles intraday and end-of-day netting modes.
 - Keep the initial implementation long-only:
   - do not open short positions unless explicitly configured later.
 - Use the market-state fields returned by positions (where available) only as a supplemental signal; the primary gating is handled in Story 005-008.
@@ -473,18 +470,17 @@ async def safe_position_check(
 
 ## Test Plan
 - Unit tests (mock positions response):
-  - No position → sell skipped.
-  - Existing position → buy skipped.
-  - Existing position → sell amount computed correctly (full close or configured).
+  - No NetPosition → sell skipped.
+  - Existing NetPosition → buy skipped.
+  - Existing NetPosition → sell amount computed correctly (full close or configured).
 - Integration (SIM):
   - Create a small position via buy order, then verify subsequent buy signals are skipped.
   - Trigger sell, verify sell is placed and position reduces/closes.
 
 ## Dependencies / Assumptions
-- Requires access to Portfolio positions endpoints.
+- Requires access to Portfolio NetPositions endpoints.
 - Assumes consistent instrument id mapping between market data signals and portfolio responses.
 
 ## Primary Sources
-- https://www.developer.saxo/openapi/referencedocs/port/v1/positions/get__port__positions
 - https://www.developer.saxo/openapi/referencedocs/port/v1/netpositions/get__port__netpositions
 - https://www.developer.saxo/openapi/learn/reference-data
