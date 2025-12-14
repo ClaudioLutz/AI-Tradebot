@@ -49,6 +49,7 @@ GET /dm/v2/disclaimers?DisclaimerTokens=DM_RISK_WARNING_2025_Q1&DisclaimerTokens
 **Response envelope**: This endpoint returns a **Data feed structure** (array), not a flat single object. See parsing example below.
 
 > **ACTION**: Explicitly remove any legacy flat-object parsing paths. Only parsing the `Data[]` envelope is supported.
+> **CRITICAL**: Failing to parse the `Data` array will cause runtime errors. The client must access `response.json()["Data"][0]` (or loop) to find the disclaimer details.
 
 #### Register Disclaimer Response
 ```

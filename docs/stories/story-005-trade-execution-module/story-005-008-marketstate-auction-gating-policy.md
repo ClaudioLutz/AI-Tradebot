@@ -37,7 +37,7 @@ The following table defines the default market state policy. This table is the *
 
 | Market State | Allow Trading | Rationale |
 |--------------|---------------|-----------|
-| **Open** | ✅ Allow | Normal trading hours, full liquidity |
+| **Open** / **AutomatedTrading** | ✅ Allow | Normal trading hours, full liquidity |
 | **Closed** | ❌ Block | Market is closed, no trading possible |
 | **Unknown** | ❌ Block | Conservative: block if state cannot be determined (Catch-all) |
 | **OpeningAuction** | ❌ Block | Pre-open auction: illiquid, volatile pricing |
@@ -112,7 +112,8 @@ class MarketStatePolicy:
     version: str = "1.0"
     
     # Default allowed states (conservative)
-    allowed_states: Set[str] = field(default_factory=lambda: {"Open"})
+    # Note: "AutomatedTrading" is the equivalent of "Open" in InstrumentSessionState
+    allowed_states: Set[str] = field(default_factory=lambda: {"Open", "AutomatedTrading"})
     
     # Explicitly blocked states
     blocked_states: Set[str] = field(default_factory=lambda: {
