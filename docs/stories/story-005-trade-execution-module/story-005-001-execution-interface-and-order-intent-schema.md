@@ -11,7 +11,7 @@ in a way that is safe, testable, and debuggable. A stable schema is needed so do
 ## Scope
 In scope:
 - Define `TradeExecutor` (or equivalent) interface and core DTOs:
-  - `OrderIntent` (client_key, account_key, instrument, side, quantity, order type, duration, correlation fields)
+  - `OrderIntent` (client_key, account_key, instrument, side, quantity, order type, duration, correlation fields, manual_order flag)
   - `PrecheckResult` (normalized success/failure + cost/margin fields + disclaimers payload)
   - `ExecutionResult` (dry-run vs sim outcomes, order id(s), reconciliation status)
 - Define correlation fields:
@@ -24,18 +24,19 @@ Out of scope:
 - Advanced order types (Limit/Stop/OCO/related orders) beyond what the epic requires
 
 ## Acceptance Criteria
-1. `OrderIntent` supports the minimum fields needed to place Stock and FxSpot market orders:
-   `(client_key, account_key, asset_type, uic, buy_sell, amount, order_type='Market', order_duration, external_reference, request_id)`.
-2. `external_reference` is generated for every intent and is validated to be <= 50 characters.
-3. `request_id` is generated for every mutation attempt and is emitted as `x-request-id` for:
+1. `OrderIntent` supports the minimum fields needed to place Stock and FxSpot/FxCrypto market orders:
+   `(client_key, account_key, asset_type, uic, buy_sell, amount, order_type='Market', order_duration, external_reference, request_id, manual_order)`.
+2. `manual_order` defaults to `False` (Automated) but can be set to `True` for UI-driven flows.
+3. `external_reference` is generated for every intent and is validated to be <= 50 characters.
+4. `request_id` is generated for every mutation attempt and is emitted as `x-request-id` for:
    - POST /trade/v2/orders/precheck (correlation + helps avoid tight-loop duplicate behavior)
    - POST /trade/v2/orders
    - PATCH /trade/v2/orders (future)
    - DELETE /trade/v2/orders (future)
    - **Rule**: Reuse `request_id` ONLY for idempotent retries of the exact same operation. Regenerate `request_id` for new attempts or when modifying parameters.
-4. Logging context contains at minimum:
+5. Logging context contains at minimum:
    `{instrument_id, asset_type, uic, symbol, client_key, account_key, external_reference, request_id, order_id?, http_status?}`.
-5. Interface supports `dry_run: bool` to drive DRY_RUN vs SIM behavior, without changing caller code.
+6. Interface supports `dry_run: bool` to drive DRY_RUN vs SIM behavior, without changing caller code.
 
 ## Technical Implementation Details
 
@@ -50,6 +51,7 @@ from enum import Enum
 class AssetType(Enum):
     STOCK = "Stock"
     FX_SPOT = "FxSpot"
+    FX_CRYPTO = "FxCrypto"  # Added for crypto migration
 
 class BuySell(Enum):
     BUY = "Buy"
@@ -80,12 +82,13 @@ class OrderIntent:
     """
     client_key: str   # Saxo ClientKey (required for Portfolio queries)
     account_key: str  # Saxo AccountKey (e.g., "Cf4xZWiYL6W1nMKpygBLLA==")
-    asset_type: AssetType  # Stock, FxSpot, etc.
+    asset_type: AssetType  # Stock, FxSpot, FxCrypto etc.
     uic: int  # Universal Instrument Code
     buy_sell: BuySell  # Buy or Sell
-    amount: float  # Quantity (respects AmountDecimals per instrument)
+    amount: float  # Quantity (Shares for Equity, Base Units for FX - NOT Lots)
     order_type: OrderType = OrderType.MARKET
     order_duration: OrderDuration = OrderDuration(OrderDurationType.DAY_ORDER)
+    manual_order: bool = False  # False = Automated/Algo, True = Human/GUI
     
     # Correlation fields
     external_reference: str = ""  # Max 50 chars, set by executor
@@ -282,14 +285,19 @@ def intent_to_saxo_order_request(intent: OrderIntent) -> dict:
         "BuySell": intent.buy_sell.value,
         "OrderType": intent.order_type.value,
         "Uic": intent.uic,
-        "ManualOrder": False,  # Automated trading
+        "ManualOrder": intent.manual_order,
         "OrderDuration": {
             "DurationType": intent.order_duration.duration_type.value
         }
     }
     
+    # Enforce DayOrder for Market orders per rigorous Saxo requirements
+    if intent.order_type == OrderType.MARKET and intent.order_duration.duration_type != OrderDurationType.DAY_ORDER:
+        # Override or raise? Safest is to force DayOrder for Market to prevent rejection
+        request_body["OrderDuration"]["DurationType"] = OrderDurationType.DAY_ORDER.value
+
     # Add expiration for GoodTillDate
-    if intent.order_duration.expiration_datetime:
+    if intent.order_duration.expiration_datetime and request_body["OrderDuration"]["DurationType"] == "GoodTillDate":
         request_body["OrderDuration"]["ExpirationDateTime"] = intent.order_duration.expiration_datetime
     
     # Add external reference for correlation
@@ -320,6 +328,7 @@ def create_execution_log_context(intent: OrderIntent, result: ExecutionResult) -
         "buy_sell": intent.buy_sell.value,
         "amount": intent.amount,
         "order_type": intent.order_type.value,
+        "manual_order": intent.manual_order,
         
         # Correlation fields
         "client_key": intent.client_key,
@@ -351,22 +360,26 @@ def log_execution(intent: OrderIntent, result: ExecutionResult, logger: logging.
 
 ## Implementation Notes
 - Treat `(AssetType, Uic)` as the canonical instrument key (Saxo docs consistently describe instruments by UIC + AssetType).
+- **AssetType Migration**: Be aware of `FxSpot` vs `FxCrypto` distinction.
 - Use an internal `ExecutionContext` to carry correlation/log metadata through all steps.
 - ExternalReference:
   - Keep short and deterministic enough for tracing (e.g., "E005:{strategy}:{ts}:{hash}").
   - Enforce max-length and ensure truncation is logged when applied.
+  - **Not Unique Server-Side**: The API does NOT enforce uniqueness. Use it for client-side scanning/reconciliation.
 - x-request-id:
   - Generate a UUIDv4 per placement attempt and persist it in logs.
   - Do not reuse request_id across attempts unless you explicitly want Saxo to treat the operation as the same.
   - **Explicit Rule**: If a request fails with an ambiguous error (timeout) and you wish to retry *idempotently*, use the same `request_id`. If you are retrying because of a logical rejection or starting a fresh attempt sequence, generate a *new* `request_id` to avoid 409 Conflict / duplicate detection windows.
 - Default order duration:
-  - For market orders, prefer `DayOrder` unless strategy-specific configuration says otherwise.
+  - For market orders, **MUST** be `DayOrder`.
 
 ## Test Plan
 - Unit tests:
   - Validate `external_reference` length handling (accept <= 50; reject/trim > 50 with log).
   - Validate `request_id` generation and header injection into HTTP client.
   - Validate serialization of `OrderIntent` into the exact request body fields expected by Saxo.
+  - Verify `manual_order` flag propagates correctly.
+  - Verify `FxCrypto` is supported.
 - Contract-style tests:
   - Snapshot JSON for a Stock market order and an FxSpot market order.
 
@@ -400,7 +413,8 @@ def test_intent_to_saxo_request_mapping():
         uic=211,
         buy_sell=BuySell.BUY,
         amount=100,
-        external_reference="E005:TEST:211:abc12"
+        external_reference="E005:TEST:211:abc12",
+        manual_order=True
     )
     
     request = intent_to_saxo_order_request(intent)
@@ -412,7 +426,8 @@ def test_intent_to_saxo_request_mapping():
     assert request["Amount"] == 100
     assert request["OrderType"] == "Market"
     assert request["ExternalReference"] == "E005:TEST:211:abc12"
-    assert request["ManualOrder"] is False
+    assert request["ManualOrder"] is True
+    assert request["OrderDuration"]["DurationType"] == "DayOrder"
 
 def test_request_id_uniqueness():
     """Test that request_id values are unique"""
