@@ -28,14 +28,503 @@ In scope:
 4. On TradeNotCompleted/timeouts for exchange-based products, executor performs reconciliation instead of retrying placement.
 5. All retries include correlation fields (`external_reference`, `request_id`) and do not violate duplicate-operation protections.
 
+## Technical Architecture
+
+### Rate Limiter Implementation
+
+```python
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+import time
+
+@dataclass
+class RateLimitConfig:
+    """Configuration for rate limiting"""
+    orders_per_second: float = 1.0  # Saxo limit: 1 order/sec/session
+    burst_allowance: int = 0  # No burst for orders
+    enable_adaptive: bool = True  # Adapt based on 429 responses
+    
+class TokenBucketRateLimiter:
+    """
+    Token bucket rate limiter for order operations
+    
+    Enforces 1 order/second limit per session as required by Saxo
+    """
+    
+    def __init__(self, config: RateLimitConfig):
+        self.config = config
+        self.tokens: float = 1.0
+        self.max_tokens: float = 1.0 + config.burst_allowance
+        self.last_update: float = time.time()
+        self.lock = asyncio.Lock()
+        self._wait_until: Optional[float] = None
+        
+    async def acquire(self, operation: str = "order") -> None:
+        """
+        Acquire a token before making an order request
+        
+        Args:
+            operation: Type of operation (for logging)
+        """
+        async with self.lock:
+            now = time.time()
+            
+            # If we have a rate limit reset time, wait until then
+            if self._wait_until and now < self._wait_until:
+                wait_seconds = self._wait_until - now
+                logger.info(
+                    "rate_limit_waiting",
+                    operation=operation,
+                    wait_seconds=round(wait_seconds, 2)
+                )
+                await asyncio.sleep(wait_seconds)
+                now = time.time()
+                self._wait_until = None
+            
+            # Refill tokens based on elapsed time
+            elapsed = now - self.last_update
+            self.tokens = min(
+                self.max_tokens,
+                self.tokens + (elapsed * self.config.orders_per_second)
+            )
+            self.last_update = now
+            
+            # Wait if no tokens available
+            if self.tokens < 1.0:
+                wait_time = (1.0 - self.tokens) / self.config.orders_per_second
+                logger.info(
+                    "rate_limit_token_wait",
+                    operation=operation,
+                    wait_seconds=round(wait_time, 2),
+                    tokens_available=round(self.tokens, 3)
+                )
+                await asyncio.sleep(wait_time)
+                self.tokens = 1.0
+                self.last_update = time.time()
+            
+            # Consume token
+            self.tokens -= 1.0
+            logger.debug(
+                "rate_limit_token_acquired",
+                operation=operation,
+                tokens_remaining=round(self.tokens, 3)
+            )
+            
+    def set_reset_time(self, reset_timestamp: Optional[int]) -> None:
+        """
+        Set explicit wait time based on X-RateLimit-Reset header
+        
+        Args:
+            reset_timestamp: Unix timestamp when rate limit resets
+        """
+        if reset_timestamp:
+            self._wait_until = float(reset_timestamp)
+            logger.warning(
+                "rate_limit_reset_scheduled",
+                reset_at=datetime.fromtimestamp(reset_timestamp).isoformat(),
+                wait_seconds=round(self._wait_until - time.time(), 2)
+            )
+```
+
+### Rate Limit Header Parser
+
+```python
+from typing import Dict, Optional
+
+@dataclass
+class RateLimitInfo:
+    """Parsed rate limit information from response headers"""
+    session_orders_limit: Optional[int] = None
+    session_orders_remaining: Optional[int] = None
+    session_orders_reset: Optional[int] = None  # Unix timestamp
+    session_requests_limit: Optional[int] = None
+    session_requests_remaining: Optional[int] = None
+    session_requests_reset: Optional[int] = None
+    
+    @property
+    def is_near_limit(self) -> bool:
+        """Check if we're close to hitting the limit"""
+        if self.session_orders_remaining is not None:
+            return self.session_orders_remaining < 3
+        return False
+        
+def parse_rate_limit_headers(headers: Dict[str, str]) -> RateLimitInfo:
+    """
+    Parse Saxo rate limit headers from HTTP response
+    
+    Headers:
+    - X-RateLimit-SessionOrders-Limit
+    - X-RateLimit-SessionOrders-Remaining
+    - X-RateLimit-SessionOrders-Reset
+    - X-RateLimit-SessionRequests-Limit
+    - X-RateLimit-SessionRequests-Remaining
+    - X-RateLimit-SessionRequests-Reset
+    """
+    return RateLimitInfo(
+        session_orders_limit=_safe_int(headers.get("X-RateLimit-SessionOrders-Limit")),
+        session_orders_remaining=_safe_int(headers.get("X-RateLimit-SessionOrders-Remaining")),
+        session_orders_reset=_safe_int(headers.get("X-RateLimit-SessionOrders-Reset")),
+        session_requests_limit=_safe_int(headers.get("X-RateLimit-SessionRequests-Limit")),
+        session_requests_remaining=_safe_int(headers.get("X-RateLimit-SessionRequests-Remaining")),
+        session_requests_reset=_safe_int(headers.get("X-RateLimit-SessionRequests-Reset"))
+    )
+
+def _safe_int(value: Optional[str]) -> Optional[int]:
+    """Safely convert string to int"""
+    try:
+        return int(value) if value else None
+    except (ValueError, TypeError):
+        return None
+```
+
+### Retry Policy Implementation
+
+```python
+from enum import Enum
+from typing import Callable, TypeVar, Optional
+import random
+
+class RetryCategory(Enum):
+    """Categories for retry behavior"""
+    TRANSIENT_NETWORK = "transient_network"  # Retry with backoff
+    RATE_LIMITED = "rate_limited"  # Retry after reset
+    CONFLICT = "conflict"  # Do not retry
+    TRADE_NOT_COMPLETED = "trade_not_completed"  # Reconcile, do not retry
+    CLIENT_ERROR = "client_error"  # Do not retry (4xx)
+    SERVER_ERROR = "server_error"  # Retry with backoff
+    UNKNOWN = "unknown"  # Conservative retry
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry behavior"""
+    max_retries: int = 2
+    base_delay_seconds: float = 1.0
+    max_delay_seconds: float = 10.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    
+    # Category-specific overrides
+    retry_on_conflict: bool = False
+    retry_on_trade_not_completed: bool = False
+
+def classify_error(
+    status_code: int,
+    error_code: Optional[str],
+    error_message: str
+) -> RetryCategory:
+    """
+    Classify error for retry decision
+    
+    Args:
+        status_code: HTTP status code
+        error_code: Saxo error code if available
+        error_message: Error message text
+        
+    Returns:
+        RetryCategory indicating how to handle
+    """
+    # 429 Too Many Requests
+    if status_code == 429:
+        return RetryCategory.RATE_LIMITED
+        
+    # 409 Conflict (duplicate operation)
+    if status_code == 409:
+        return RetryCategory.CONFLICT
+        
+    # 4xx Client Errors (don't retry)
+    if 400 <= status_code < 500:
+        # Special case: TradeNotCompleted
+        if "TradeNotCompleted" in error_message or error_code == "TradeNotCompleted":
+            return RetryCategory.TRADE_NOT_COMPLETED
+        return RetryCategory.CLIENT_ERROR
+        
+    # 5xx Server Errors (retry)
+    if 500 <= status_code < 600:
+        return RetryCategory.SERVER_ERROR
+        
+    # Network/timeout errors (retry)
+    if status_code == 0 or status_code is None:
+        return RetryCategory.TRANSIENT_NETWORK
+        
+    return RetryCategory.UNKNOWN
+
+class RetryPolicy:
+    """Implements retry logic with exponential backoff and jitter"""
+    
+    def __init__(self, config: RetryConfig, rate_limiter: TokenBucketRateLimiter):
+        self.config = config
+        self.rate_limiter = rate_limiter
+        
+    async def execute_with_retry(
+        self,
+        operation: Callable,
+        operation_name: str,
+        external_reference: str,
+        **kwargs
+    ) -> any:
+        """
+        Execute operation with retry logic
+        
+        Args:
+            operation: Async callable to execute
+            operation_name: Name for logging
+            external_reference: Correlation ID
+            **kwargs: Arguments to pass to operation
+            
+        Returns:
+            Result from operation
+            
+        Raises:
+            Exception if all retries exhausted
+        """
+        last_exception = None
+        
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                # Acquire rate limit token before each attempt
+                await self.rate_limiter.acquire(operation_name)
+                
+                logger.info(
+                    "executing_operation",
+                    operation=operation_name,
+                    attempt=attempt + 1,
+                    max_attempts=self.config.max_retries + 1,
+                    external_reference=external_reference
+                )
+                
+                result = await operation(**kwargs)
+                
+                # Success - parse rate limit headers if present
+                if hasattr(result, 'headers'):
+                    rate_info = parse_rate_limit_headers(result.headers)
+                    if rate_info.is_near_limit:
+                        logger.warning(
+                            "approaching_rate_limit",
+                            remaining=rate_info.session_orders_remaining,
+                            operation=operation_name
+                        )
+                
+                return result
+                
+            except Exception as e:
+                last_exception = e
+                
+                # Determine retry category
+                status_code = getattr(e, 'status_code', None)
+                error_code = getattr(e, 'error_code', None)
+                error_message = str(e)
+                
+                category = classify_error(status_code, error_code, error_message)
+                
+                logger.warning(
+                    "operation_failed",
+                    operation=operation_name,
+                    attempt=attempt + 1,
+                    status_code=status_code,
+                    category=category.value,
+                    error=error_message,
+                    external_reference=external_reference
+                )
+                
+                # Handle specific categories
+                if category == RetryCategory.CONFLICT:
+                    if not self.config.retry_on_conflict:
+                        logger.error(
+                            "conflict_no_retry",
+                            operation=operation_name,
+                            message="Duplicate operation detected (409). Check x-request-id.",
+                            external_reference=external_reference
+                        )
+                        raise
+                        
+                elif category == RetryCategory.TRADE_NOT_COMPLETED:
+                    if not self.config.retry_on_trade_not_completed:
+                        logger.error(
+                            "trade_not_completed_no_retry",
+                            operation=operation_name,
+                            message="Order may be pending. Reconcile via portfolio query.",
+                            external_reference=external_reference
+                        )
+                        raise
+                        
+                elif category == RetryCategory.CLIENT_ERROR:
+                    logger.error(
+                        "client_error_no_retry",
+                        operation=operation_name,
+                        status_code=status_code,
+                        external_reference=external_reference
+                    )
+                    raise
+                    
+                elif category == RetryCategory.RATE_LIMITED:
+                    # Parse reset time if available
+                    if hasattr(e, 'headers'):
+                        rate_info = parse_rate_limit_headers(e.headers)
+                        if rate_info.session_orders_reset:
+                            self.rate_limiter.set_reset_time(rate_info.session_orders_reset)
+                
+                # Check if we should retry
+                if attempt < self.config.max_retries:
+                    delay = self._calculate_backoff(attempt)
+                    logger.info(
+                        "retrying_after_delay",
+                        operation=operation_name,
+                        delay_seconds=round(delay, 2),
+                        next_attempt=attempt + 2,
+                        external_reference=external_reference
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "max_retries_exhausted",
+                        operation=operation_name,
+                        attempts=attempt + 1,
+                        external_reference=external_reference
+                    )
+                    raise
+        
+        # Should not reach here
+        raise last_exception
+        
+    def _calculate_backoff(self, attempt: int) -> float:
+        """
+        Calculate exponential backoff with jitter
+        
+        Args:
+            attempt: Current attempt number (0-indexed)
+            
+        Returns:
+            Delay in seconds
+        """
+        delay = min(
+            self.config.base_delay_seconds * (self.config.exponential_base ** attempt),
+            self.config.max_delay_seconds
+        )
+        
+        if self.config.jitter:
+            # Add random jitter ±25%
+            jitter_range = delay * 0.25
+            delay += random.uniform(-jitter_range, jitter_range)
+            
+        return max(0.1, delay)  # Minimum 100ms
+```
+
+### Request ID Management
+
+```python
+import uuid
+
+class RequestIdManager:
+    """
+    Manages x-request-id headers for idempotency
+    
+    Saxo enforces 15-second duplicate operation window based on x-request-id
+    """
+    
+    @staticmethod
+    def generate_request_id(external_reference: str, operation: str) -> str:
+        """
+        Generate unique request ID
+        
+        Format: {external_reference}_{operation}_{uuid}
+        
+        Args:
+            external_reference: Order external reference
+            operation: "precheck", "place", "modify", etc.
+            
+        Returns:
+            Unique request ID
+        """
+        unique_id = str(uuid.uuid4())[:8]
+        timestamp = int(time.time() * 1000)  # milliseconds
+        return f"{external_reference}_{operation}_{timestamp}_{unique_id}"
+        
+    @staticmethod
+    def should_regenerate_on_retry(category: RetryCategory) -> bool:
+        """
+        Determine if request_id should change on retry
+        
+        - Same request_id: Idempotent retry of exact same operation
+        - New request_id: New attempt after transient failure
+        
+        Recommendation: Generate NEW request_id on retry to avoid
+        409 Conflict if the original request partially succeeded
+        """
+        # Always use new request_id on retry
+        return True
+```
+
+### Integration Example
+
+```python
+class OrderExecutor:
+    """Example integration of rate limiting and retry"""
+    
+    def __init__(self, client: SaxoClient):
+        self.client = client
+        
+        # Initialize rate limiter
+        rate_config = RateLimitConfig(orders_per_second=1.0)
+        self.rate_limiter = TokenBucketRateLimiter(rate_config)
+        
+        # Initialize retry policy
+        retry_config = RetryConfig(
+            max_retries=2,
+            retry_on_conflict=False,
+            retry_on_trade_not_completed=False
+        )
+        self.retry_policy = RetryPolicy(retry_config, self.rate_limiter)
+        
+    async def place_order(self, order_intent: OrderIntent) -> OrderResult:
+        """Place order with rate limiting and retry"""
+        
+        external_ref = order_intent.external_reference
+        request_id = RequestIdManager.generate_request_id(external_ref, "place")
+        
+        async def _place_operation():
+            return await self.client.post(
+                "/trade/v2/orders",
+                json=order_intent.to_dict(),
+                headers={
+                    "X-Request-ID": request_id
+                }
+            )
+        
+        try:
+            response = await self.retry_policy.execute_with_retry(
+                operation=_place_operation,
+                operation_name="place_order",
+                external_reference=external_ref
+            )
+            
+            return OrderResult.from_response(response)
+            
+        except Exception as e:
+            # Log final failure
+            logger.error(
+                "order_placement_failed_final",
+                external_reference=external_ref,
+                request_id=request_id,
+                error=str(e)
+            )
+            raise
+```
+
 ## Implementation Notes
-- Use a token-bucket or simple “sleep until next slot” approach for 1 order/sec; keep it deterministic.
+- Use a token-bucket or simple "sleep until next slot" approach for 1 order/sec; keep it deterministic.
 - Parse rate limit headers if present:
   - X-RateLimit-SessionOrders-Limit / Remaining / Reset
   - X-RateLimit-SessionRequests-* (as applicable)
 - Keep retry budget low (e.g., 2–3 retries) to avoid cascading actions in fast loops.
-- Ensure request_id changes between separate intentional order operations; for “retry same operation” you must decide whether to reuse or change.
+- Ensure request_id changes between separate intentional order operations; for "retry same operation" you must decide whether to reuse or change.
   - Default: do NOT re-try order placement; reconcile.
+- **Token Bucket**: Provides smooth rate limiting with deterministic behavior for testing
+- **Jitter**: Prevents thundering herd when multiple operations retry simultaneously
+- **Request ID Strategy**: Generate new request_id on each retry to avoid 409 Conflict
+- **Conservative Defaults**: Most errors don't auto-retry; prefer reconciliation over duplicate risk
+- **Correlation**: Include `external_reference` in all log events for end-to-end tracing
 
 ## Test Plan
 - Unit tests:
