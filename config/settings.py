@@ -3,15 +3,22 @@ Configuration Settings - Saxo Bank Integration
 Central configuration for trading bot parameters.
 """
 import os
+import logging
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# Module logger
+logger = logging.getLogger(__name__)
+
 # Saxo API Configuration
 SAXO_ENV = os.getenv("SAXO_ENV", "SIM")
 SAXO_REST_BASE = os.getenv("SAXO_REST_BASE")
 SAXO_ACCESS_TOKEN = os.getenv("SAXO_ACCESS_TOKEN")
+SAXO_ACCOUNT_KEY = os.getenv("SAXO_ACCOUNT_KEY")
+SAXO_CLIENT_KEY = os.getenv("SAXO_CLIENT_KEY")
+SAXO_AUTH_MODE = os.getenv("SAXO_AUTH_MODE", "manual")  # "oauth" or "manual"
 
 # Trading Configuration
 WATCHLIST = [
@@ -60,6 +67,16 @@ MAX_POSITION_SIZE = 1000  # Maximum dollar amount per position
 MAX_DAILY_LOSS = 500  # Maximum loss per day before stopping
 MAX_DAILY_TRADES = 10  # Maximum number of trades per day
 
+# Trading Hours Configuration (Epic 006)
+TRADING_HOURS_MODE = os.getenv("TRADING_HOURS_MODE", "always")  # "always", "fixed", or "instrument"
+TRADING_START = os.getenv("TRADING_START", "09:30")  # Market open time (HH:MM format)
+TRADING_END = os.getenv("TRADING_END", "16:00")  # Market close time (HH:MM format)
+TIMEZONE = os.getenv("TIMEZONE", "America/New_York")  # Market timezone
+
+# Cycle Configuration
+CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))  # 5 minutes default
+DEFAULT_QUANTITY = float(os.getenv("DEFAULT_QUANTITY", "1.0"))  # Default trade quantity
+
 # Scheduling (if using scheduler)
 TRADING_SCHEDULE = "09:30"  # Time to run trading logic (format: "HH:MM")
 CHECK_INTERVAL_MINUTES = 15  # How often to check positions/signals
@@ -72,4 +89,5 @@ LOG_FILE = "logs/trading_bot.log"
 __version__ = "2.0.0"
 __api__ = "Saxo OpenAPI"
 
-print(f"Configuration loaded: {len(WATCHLIST)} instruments in watchlist ({SAXO_ENV} environment)")
+# Log configuration load (will only appear when logging is configured)
+logger.debug(f"Configuration loaded: {len(WATCHLIST)} instruments in watchlist ({SAXO_ENV} environment)")
