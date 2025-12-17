@@ -72,6 +72,7 @@ def _float_env(name: str, default: float) -> float:
 
 MIN_QUOTES_POLL_SECONDS = _float_env("SAXO_MIN_QUOTES_POLL_SECONDS", 5.0)
 MIN_BARS_POLL_SECONDS = _float_env("SAXO_MIN_BARS_POLL_SECONDS", 10.0)
+MIN_ORDERS_POLL_SECONDS = _float_env("SAXO_MIN_ORDERS_POLL_SECONDS", 1.0)
 
 # Retry configuration
 MAX_RETRIES = 3
@@ -292,6 +293,7 @@ class SaxoClient:
         min_intervals = {
             "quotes": MIN_QUOTES_POLL_SECONDS,
             "bars": MIN_BARS_POLL_SECONDS,
+            "orders": MIN_ORDERS_POLL_SECONDS,
             "default": 1.0
         }
         
@@ -310,6 +312,7 @@ class SaxoClient:
         self, 
         path: str, 
         params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
         endpoint_type: str = "default",
         max_retries: int = MAX_RETRIES
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -319,6 +322,7 @@ class SaxoClient:
         Args:
             path: API endpoint path
             params: Optional query parameters
+            headers: Optional HTTP headers to merge with default headers
             endpoint_type: Type of endpoint for rate limiting ("quotes", "bars", "default")
             max_retries: Maximum number of retries for transient errors
         
@@ -336,11 +340,15 @@ class SaxoClient:
         last_error: Optional[Exception] = None
         last_rate_info: Dict[str, Any] = {}
         
+        request_headers = self.headers.copy()
+        if headers:
+            request_headers.update(headers)
+
         for attempt in range(max_retries + 1):
             try:
                 response = requests.get(
                     url,
-                    headers=self.headers,
+                    headers=request_headers,
                     params=params,
                     timeout=30
                 )
@@ -438,13 +446,19 @@ class SaxoClient:
         
         raise SaxoAPIError(f"GET {path} failed after {max_retries + 1} attempts")
     
-    def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
         """
         Make GET request to Saxo API.
         
         Args:
             path: API endpoint path
             params: Optional query parameters
+            headers: Optional HTTP headers
         
         Returns:
             JSON response as dictionary
@@ -452,14 +466,16 @@ class SaxoClient:
         Raises:
             SaxoAPIError: If request fails or returns error status
         """
-        data, _ = self.get_with_headers(path, params)
+        data, _ = self.get_with_headers(path, params, headers=headers)
         return data
     
     def post(
         self,
         path: str,
         json_body: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        endpoint_type: str = "default"
     ) -> Dict[str, Any]:
         """
         Make POST request to Saxo API.
@@ -468,6 +484,8 @@ class SaxoClient:
             path: API endpoint path
             json_body: Optional JSON body for request
             params: Optional query parameters
+            headers: Optional HTTP headers
+            endpoint_type: Type of endpoint for rate limiting ("quotes", "bars", "orders", "default")
         
         Returns:
             JSON response as dictionary
@@ -475,12 +493,18 @@ class SaxoClient:
         Raises:
             SaxoAPIError: If request fails or returns error status
         """
+        self._enforce_min_interval(endpoint_type)
+
         url = f"{self.base_url}{path}"
         
+        request_headers = self.headers.copy()
+        if headers:
+            request_headers.update(headers)
+
         try:
             response = requests.post(
                 url,
-                headers=self.headers,
+                headers=request_headers,
                 json=json_body,
                 params=params,
                 timeout=30
@@ -510,7 +534,9 @@ class SaxoClient:
     def delete(
         self,
         path: str,
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        endpoint_type: str = "default"
     ) -> Dict[str, Any]:
         """
         Make DELETE request to Saxo API.
@@ -518,6 +544,8 @@ class SaxoClient:
         Args:
             path: API endpoint path
             params: Optional query parameters
+            headers: Optional HTTP headers
+            endpoint_type: Type of endpoint for rate limiting ("quotes", "bars", "orders", "default")
         
         Returns:
             JSON response as dictionary
@@ -525,12 +553,18 @@ class SaxoClient:
         Raises:
             SaxoAPIError: If request fails or returns error status
         """
+        self._enforce_min_interval(endpoint_type)
+
         url = f"{self.base_url}{path}"
         
+        request_headers = self.headers.copy()
+        if headers:
+            request_headers.update(headers)
+
         try:
             response = requests.delete(
                 url,
-                headers=self.headers,
+                headers=request_headers,
                 params=params,
                 timeout=30
             )
