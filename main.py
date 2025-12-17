@@ -30,6 +30,7 @@ import argparse
 import logging
 import time
 import sys
+import uuid
 from datetime import datetime, time as time_obj
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Any
@@ -42,6 +43,8 @@ from strategies.base import BaseStrategy
 from strategies.registry import get_strategy
 from execution.trade_executor import SaxoTradeExecutor
 from execution.models import OrderIntent, BuySell, AssetType
+from logging_config import setup_logging
+from common.log_context import TradingContextAdapter
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -143,17 +146,7 @@ Examples:
     return parser.parse_args()
 
 
-def setup_logging() -> None:
-    """Configure structured logging for the application."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    
-    # Reduce noise from third-party libraries
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
+# Replaced by logging_config.setup_logging
 
 
 def log_startup_banner(args: argparse.Namespace) -> None:
@@ -418,34 +411,58 @@ def main():
     # Parse arguments
     args = parse_arguments()
     
-    # Setup logging
-    setup_logging()
+    # Setup logging (non-blocking, redacted)
+    log_listener = setup_logging(log_level="DEBUG" if args.dry_run else "INFO")
+
+    # Generate Run ID
+    run_id = str(uuid.uuid4())
+
+    # Initialize context logger for main startup
+    # We use a global variable or pass it down?
+    # Better to re-bind logger to the adapter locally
+    main_logger = TradingContextAdapter(logger, {'run_id': run_id, 'cycle_id': 'INIT'})
     
     # Log startup banner
-    log_startup_banner(args)
+    main_logger.info("=" * 60)
+    main_logger.info("TRADING BOT STARTING")
+    main_logger.info("=" * 60)
+    main_logger.log_event("startup_begin",
+        mode='DRY_RUN' if args.dry_run else 'SIM',
+        execution='Single Cycle' if args.single_cycle else 'Continuous Loop',
+        timestamp=datetime.now().isoformat()
+    )
+    main_logger.info("=" * 60)
     
     try:
         # 1. Load configuration (once at startup, immutable)
         config = load_configuration()
+        main_logger.log_event("startup_config_loaded")
         
         # 2. Initialize Saxo client
         saxo_client = initialize_saxo_client(config)
         
         # 3. Run trading logic
         if args.single_cycle:
-            logger.info("Running single cycle mode")
+            cycle_id = str(uuid.uuid4())
+            cycle_logger = TradingContextAdapter(logger, {'run_id': run_id, 'cycle_id': cycle_id})
+            cycle_logger.info("Running single cycle mode")
+
             run_cycle(config, saxo_client, dry_run=args.dry_run)
         else:
-            logger.info("Running continuous loop mode")
+            main_logger.info("Running continuous loop mode")
             cycle_count = 0
             while True:
                 cycle_count += 1
-                logger.info(f"Cycle #{cycle_count}")
+                cycle_id = str(uuid.uuid4())
+                cycle_logger = TradingContextAdapter(logger, {'run_id': run_id, 'cycle_id': cycle_id})
+
+                cycle_logger.log_event("cycle_begin", count=cycle_count)
                 run_cycle(config, saxo_client, dry_run=args.dry_run)
+                cycle_logger.log_event("cycle_end")
                 
                 # Wait before next cycle
                 sleep_time = config.CYCLE_INTERVAL_SECONDS
-                logger.info(f"Sleeping for {sleep_time} seconds until next cycle")
+                cycle_logger.info(f"Sleeping for {sleep_time} seconds until next cycle")
                 time.sleep(sleep_time)
     
     except KeyboardInterrupt:
@@ -459,6 +476,7 @@ def main():
         logger.info("=" * 60)
         logger.info("TRADING BOT SHUTDOWN COMPLETE")
         logger.info("=" * 60)
+        log_listener.stop()
     
     return 0  # Exit successfully
 

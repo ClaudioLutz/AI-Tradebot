@@ -344,14 +344,23 @@ class SaxoClient:
         if headers:
             request_headers.update(headers)
 
+        # Extract ID for tracing
+        request_id = request_headers.get("X-Request-ID", "N/A")
+
+        logger.info(f"http_request_out method=GET path={path} request_id={request_id}")
+
         for attempt in range(max_retries + 1):
             try:
+                start_time = time.time()
                 response = requests.get(
                     url,
                     headers=request_headers,
                     params=params,
                     timeout=30
                 )
+                duration_ms = int((time.time() - start_time) * 1000)
+
+                logger.info(f"http_response_in method=GET path={path} status={response.status_code} duration_ms={duration_ms} request_id={request_id}")
                 
                 # Parse rate limit headers on every response
                 rate_limit_info = parse_rate_limit_headers(dict(response.headers))
@@ -501,7 +510,11 @@ class SaxoClient:
         if headers:
             request_headers.update(headers)
 
+        request_id = request_headers.get("X-Request-ID", "N/A")
+        logger.info(f"http_request_out method=POST path={path} request_id={request_id}")
+
         try:
+            start_time = time.time()
             response = requests.post(
                 url,
                 headers=request_headers,
@@ -509,6 +522,9 @@ class SaxoClient:
                 params=params,
                 timeout=30
             )
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            logger.info(f"http_response_in method=POST path={path} status={response.status_code} duration_ms={duration_ms} request_id={request_id}")
             
             # Parse and log rate limit headers
             rate_limit_info = parse_rate_limit_headers(dict(response.headers))
@@ -561,13 +577,20 @@ class SaxoClient:
         if headers:
             request_headers.update(headers)
 
+        request_id = request_headers.get("X-Request-ID", "N/A")
+        logger.info(f"http_request_out method=DELETE path={path} request_id={request_id}")
+
         try:
+            start_time = time.time()
             response = requests.delete(
                 url,
                 headers=request_headers,
                 params=params,
                 timeout=30
             )
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            logger.info(f"http_response_in method=DELETE path={path} status={response.status_code} duration_ms={duration_ms} request_id={request_id}")
             
             # Parse and log rate limit headers
             rate_limit_info = parse_rate_limit_headers(dict(response.headers))

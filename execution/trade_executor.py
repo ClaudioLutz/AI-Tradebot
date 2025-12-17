@@ -117,8 +117,9 @@ class SaxoTradeExecutor(TradeExecutor):
             )
 
         logger.info(
-            f"Starting execution for {intent.external_reference}",
+            f"execution_intent_created",
             extra={
+                "external_reference": intent.external_reference,
                 "asset_type": intent.asset_type.value,
                 "uic": intent.uic,
                 "buy_sell": intent.buy_sell.value,
@@ -172,11 +173,12 @@ class SaxoTradeExecutor(TradeExecutor):
         # But if guard allowed it, we proceed.
 
         # 3. Precheck
+        logger.info(f"execution_precheck_begin", extra={'external_reference': intent.external_reference})
         precheck_result = self.precheck_client.execute_precheck(intent)
         
         if not precheck_result.success:
             error_msg = precheck_result.error_message or "Unknown precheck error"
-            logger.warning(f"Precheck failed: {error_msg}")
+            logger.warning(f"execution_precheck_failed reason={error_msg}", extra={'external_reference': intent.external_reference})
             return ExecutionResult(
                 status=ExecutionStatus.FAILED_PRECHECK,
                 order_intent=intent,
@@ -185,7 +187,10 @@ class SaxoTradeExecutor(TradeExecutor):
                 timestamp=datetime.utcnow().isoformat()
             )
 
+        logger.info(f"execution_precheck_passed", extra={'external_reference': intent.external_reference})
+
         # 4. Disclaimer Handling
+        logger.info(f"execution_disclaimer_check", extra={'external_reference': intent.external_reference})
         disclaimer_outcome = self.disclaimer_service.evaluate_disclaimers(precheck_result, intent)
 
         if not disclaimer_outcome.allow_trading:
@@ -199,7 +204,7 @@ class SaxoTradeExecutor(TradeExecutor):
                 msg_parts.append(f"Errors: {disclaimer_outcome.errors}")
 
             full_msg = "; ".join(msg_parts)
-            logger.warning(f"Blocked by disclaimers: {full_msg}")
+            logger.warning(f"execution_disclaimer_blocked reason={full_msg}", extra={'external_reference': intent.external_reference})
 
             return ExecutionResult(
                 status=ExecutionStatus.BLOCKED_BY_DISCLAIMER,
@@ -209,9 +214,11 @@ class SaxoTradeExecutor(TradeExecutor):
                 timestamp=datetime.utcnow().isoformat()
             )
 
+        logger.info(f"execution_disclaimer_resolved", extra={'external_reference': intent.external_reference})
+
         # 5. Placement
         if dry_run:
-            logger.info(f"DRY RUN: Skipping placement for {intent.external_reference}")
+            logger.info(f"execution_dry_run_complete", extra={'external_reference': intent.external_reference})
             return ExecutionResult(
                 status=ExecutionStatus.DRY_RUN,
                 order_intent=intent,
@@ -229,8 +236,12 @@ class SaxoTradeExecutor(TradeExecutor):
         status = ExecutionStatus.SUCCESS
         if execution_outcome.final_status == "failure":
             status = ExecutionStatus.FAILED_PLACEMENT
+            logger.error(f"execution_order_failed", extra={'external_reference': intent.external_reference, 'reason': execution_outcome.placement.error_info if execution_outcome.placement else 'Unknown'})
         elif execution_outcome.final_status == "uncertain":
             status = ExecutionStatus.RECONCILIATION_NEEDED
+            logger.warning(f"execution_reconcile_needed", extra={'external_reference': intent.external_reference})
+        else:
+            logger.info(f"execution_order_placed", extra={'external_reference': intent.external_reference, 'order_id': execution_outcome.order_id})
 
         # Safely extract error message (1.2)
         error_msg = None
