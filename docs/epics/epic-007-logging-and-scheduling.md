@@ -1,389 +1,455 @@
 # Epic 007: Logging and Scheduling System (Saxo-aware)
 
-## Epic Overview
-Implement comprehensive logging infrastructure with Saxo-specific fields and establish scheduling mechanisms for automated bot execution. This epic ensures visibility into bot operations with support for flexible trading hours modes.
+## 1. Epic Overview
 
-## Business Value
-- Creates audit trail for all trading decisions and API interactions
-- Enables debugging and performance analysis with Saxo-critical context
-- Provides reliable automated execution via OS schedulers
-- Supports compliance and review requirements
-- Facilitates operational health monitoring
+Epic 007 delivers a production-grade, Saxo-aware observability and run-scheduling foundation for **AI-Tradebot**. It standardizes:
 
-## Scope
+1. **Logging**: consistent, auditable, grep-friendly logs with Saxo-critical context fields, safe redaction, and reliable rotation/retention.
+2. **Scheduling**: deterministic, non-overlapping execution using OS-native schedulers (systemd timers / cron / Windows Task Scheduler), aligned to `TRADING_HOURS_MODE`, with jitter to reduce API bursts.
 
-### In Scope
-- Python logging module configuration with structured format
-- **Saxo-critical fields**: `client_id`, `account_key`, `instrument_id`, `uic`, `asset_type`, `order_id`, HTTP status
-- Log file creation with rotation (`logs/` directory)
-- Log retention policies (30 days minimum)
-- Comprehensive event logging:
-  - OAuth token refresh events
-  - Data retrieval with instrument context
-  - Signal generation with instrument_id keys
-  - Order execution (precheck + placement) with Saxo OrderIds
-  - HTTP errors with status codes and response bodies
-- Scheduling documentation (cron/Task Scheduler)
-- **Trading hours scheduling** based on `TRADING_HOURS_MODE` from config
-- Random delay/jitter to avoid API bursts
-- Log analysis utilities (optional)
+This epic does **not** introduce centralized logging, dashboards, or cloud infrastructure. It focuses on a robust local operational baseline that supports debugging, auditing, and safe unattended operation.
 
-### Out of Scope
-- Centralized logging systems (ELK, Splunk, CloudWatch)
-- Real-time monitoring dashboards (Grafana, etc.)
-- Cloud-based scheduling (AWS EventBridge, GCP Scheduler)
-- Advanced alerting systems (PagerDuty, OpsGenie)
-- Log analytics and visualization tools
-- Database logging (PostgreSQL, MongoDB)
-- Structured logging formats (JSON, protobuf)
+---
 
-## Technical Considerations
+## 2. Business Value
 
-### Logging Configuration
-- Use Python `logging` module with `RotatingFileHandler` and `StreamHandler`
-- **Log format:** `timestamp | level | module | message | context_fields`
-- **Log levels:**
-  - `DEBUG`: Detailed diagnostics (HTTP requests/responses)
-  - `INFO`: Key events (cycle start, signals, orders placed)
-  - `WARNING`: Recoverable issues (stale data, precheck warnings)
-  - `ERROR`: Failures (API errors, order rejections)
-  - `CRITICAL`: System failures (auth failure, config missing)
-- **Log rotation:** Daily or size-based (10MB files, keep 5 backups)
-- **Masked sensitive data:** Mask `account_key`, `client_id` in logs (last 4 chars only)
+* **Auditability**: every trade decision and broker-side outcome can be traced by `run_id`, `cycle_id`, `external_reference`, and Saxo identifiers (`ClientKey`, `AccountKey`, `OrderId`, `UIC`, `AssetType`).
+* **Operational reliability**: scheduled runs are predictable, non-overlapping, and tolerant of transient errors (with clear post-mortem artifacts).
+* **Faster debugging**: consistent log schema allows quick isolation of failures (auth, data, precheck, disclaimers, placement, reconciliation, rate limits).
+* **Safety**: enforced redaction reduces accidental leakage of credentials/tokens.
 
-### Saxo-Specific Logging Fields
-Every log entry related to instruments or orders should include:
-- `instrument_id`: `"{asset_type}:{uic}"` (e.g., `"Stock:211"`)
-- `asset_type`: `"Stock"`, `"FxSpot"`, etc.
-- `uic`: Saxo UIC (e.g., `211`)
-- `symbol`: Human-readable label (e.g., `"AAPL"`)
-- `account_key`: Masked (e.g., `"****5678"`)
-- `order_id`: Saxo OrderId (if applicable)
-- `http_status`: HTTP status code for API calls (e.g., `200`, `400`, `429`)
-- `error_code`: Saxo error code (if applicable)
-- `error_message`: Saxo error message (if applicable)
+---
 
-### Scheduling Considerations
-- Use external scheduler (cron/Task Scheduler) for reliability
-- Schedule based on `TRADING_HOURS_MODE` from config:
-  - `always`: Run every N minutes (e.g., for CryptoFX)
-  - `fixed`: Run only during configured hours (e.g., 09:30-16:00 ET)
-  - `instrument`: (Future) per-instrument session-aware scheduling
-- Add random jitter (0-10 seconds) to distribute API load
-- Each run is independent (prevents memory leaks, easier recovery)
+## 3. Scope
 
-## Dependencies
-- **Epic 001-2:** Saxo Bank Migration (OAuth refresh logging)
-- **Epic 002:** Configuration Module (`TRADING_HOURS_MODE`)
-- **Epic 006:** Main Orchestration Script (cycle logging)
+### 3.1 In Scope
 
-## Success Criteria
-- [ ] Logging configuration module/function created
-- [ ] Logs written to `logs/bot.log` with structured format
-- [ ] All major events logged with Saxo-critical fields
-- [ ] OAuth refresh events logged (success/failure)
-- [ ] Log rotation implemented (prevents huge log files)
-- [ ] Console and file logging both work
-- [ ] Scheduling documentation complete for Windows/Linux/Mac
-- [ ] Example cron/Task Scheduler configurations provided
-- [ ] Trading hours scheduling aligned with `TRADING_HOURS_MODE`
-- [ ] Random delay mechanism implemented
+#### Logging
 
-## Acceptance Criteria
-1. Each bot cycle writes structured logs with timestamps and context
-2. Saxo-critical fields included in relevant log entries
-3. OAuth token refresh events logged with expiry times
-4. Order execution logs include: instrument_id, order_id, precheck result, placement status
-5. HTTP errors logged with status code, error body, and retry count
-6. Old log files rotated automatically (daily or size-based)
-7. Sensitive data masked (account_key, client_id)
-8. Documentation explains how to set up scheduling for different trading hours modes
-9. Can review historical bot behavior and trace orders from logs
-10. Log analysis can identify trends (API errors, successful trades, token refreshes)
+* Standard library `logging` configuration (no external log framework required).
+* Console + file logging with rotation and retention (>= 30 days default).
+* Saxo-aware log context (fields listed below).
+* Safe redaction/masking of secrets and sensitive identifiers.
+* Standardized event taxonomy (startup, auth, data, strategy, execution, API errors).
+* Optional (recommended) non-blocking logging using `QueueHandler`/`QueueListener`.
 
-## Related Documents
-- `logs/bot.log` (to be created)
-- `README.md` (scheduling section to be added)
-- [Epic 002: Configuration Module](./epic-002-configuration-module.md) (`TRADING_HOURS_MODE`)
+#### Scheduling
 
-## Logging Configuration Example
+* OS scheduler runbooks:
 
-```python
-import logging
-from logging.handlers import RotatingFileHandler
-import os
+  * Linux: systemd timer/service (preferred) and cron (fallback).
+  * Windows: Task Scheduler.
+* Recommended scheduling strategy: **invoke `main.py --single-cycle`** on a cadence; let the orchestrator enforce `TRADING_HOURS_MODE`.
+* Jitter/random delay strategy to spread API load.
+* Locking strategy to prevent overlapping runs (critical for cron/Task Scheduler).
 
-def setup_logging(log_level: str = "INFO"):
-    """Configure logging for the trading bot with Saxo-specific context."""
-    # Create logs directory if it doesn't exist
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
-    
-    # Create formatter with additional context
-    formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # File handler with rotation (10MB files, keep 5 backups)
-    file_handler = RotatingFileHandler(
-        'logs/bot.log',
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
-    )
-    file_handler.setLevel(getattr(logging, log_level.upper()))
-    file_handler.setFormatter(formatter)
-    
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    
-    # Root logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)  # Capture all, handlers filter
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    return logger
+### 3.2 Out of Scope
 
+* ELK/Splunk/CloudWatch/etc. centralized logging.
+* Dashboards, alerting platforms, paging, real-time monitoring.
+* Cloud schedulers (EventBridge, Cloud Scheduler, etc.).
+* Full structured JSON logging as the primary log format (see note below).
 
-def mask_sensitive(value: str, visible_chars: int = 4) -> str:
-    """Mask sensitive data, showing only last N characters."""
-    if not value or len(value) <= visible_chars:
-        return "****"
-    return "*" * (len(value) - visible_chars) + value[-visible_chars:]
+**Note on JSON**: This epic keeps the main logs as text (key=value). If Epic 006 produces a separate `cycle_summaries.jsonl`, it remains a *telemetry artifact*, not the primary log format.
+
+---
+
+## 4. Constraints and Design Principles
+
+1. **No secrets in logs**: Access tokens, refresh tokens, app secrets, Authorization headers, and full response bodies must never be logged unredacted.
+2. **Correlation-first**: every log line must be attributable to:
+
+   * `run_id` (process invocation)
+   * `cycle_id` (one trading cycle)
+   * and, when applicable, `instrument_id` and `external_reference`/`order_id`
+3. **Grep-friendly schema**: human-readable message + `key=value` fields appended consistently.
+4. **Fail-closed redaction**: if uncertain whether a field is sensitive, mask it.
+5. **Scheduler stability**: prefer OS-native scheduling; avoid a “forever loop daemon” as the only operational model.
+
+---
+
+## 5. Target Architecture
+
+### 5.1 Logging architecture (runtime)
+
+```
+main.py
+  ├─ setup_logging()  --> console + file handlers (+ optional queue)
+  ├─ run_id, cycle_id
+  └─ orchestrator cycle
+       ├─ market data
+       ├─ strategy
+       └─ execution
+             ├─ precheck
+             ├─ disclaimers
+             └─ placement/reconciliation
+
+Every component uses:
+  get_logger(context) -> LoggerAdapter (or equivalent)
+  log_event(event_name, message, **fields)
 ```
 
-## What to Log (Saxo-Specific)
+### 5.2 Scheduling architecture (ops)
 
-### 1. Startup Events
-```python
-logger.info("Trading Bot Starting")
-logger.info(f"Config loaded: {len(watchlist)} instruments, mode={trading_hours_mode}")
-logger.info(f"Auth mode: {'OAuth' if oauth_enabled else 'Manual Token'}")
-logger.info(f"Environment: {'SIM' if is_sim else 'LIVE'}")
-logger.info(f"AccountKey: {mask_sensitive(account_key)}")
+Preferred: **systemd timer/service** calls:
+
+```
+python /path/to/AI-Tradebot/main.py --single-cycle
 ```
 
-### 2. OAuth Token Management
-```python
-logger.info(f"OAuth token refreshed successfully, expires_at={expires_at}")
-logger.error(f"OAuth token refresh failed: {error_message}")
-logger.warning(f"Token expires in {minutes_remaining} minutes")
+* Prevent overlap via `flock` (cron) or systemd service configuration and lockfile.
+* Use jitter at scheduler layer (systemd) or inside the script.
+
+---
+
+## 6. Logging Specification
+
+### 6.1 Log destinations
+
+* **Console**: INFO+ by default.
+* **File**: INFO+ by default, rotated daily (or size-based if configured).
+
+Default directory: `./logs/`
+Default main file: `./logs/bot.log`
+
+### 6.2 Rotation & retention
+
+Default recommended policy:
+
+* Time-based rotation: daily at midnight (local time or UTC, choose and document).
+* Retention: keep **30** rotated files (30 days).
+
+Config options (env vars; names can be finalized during implementation):
+
+* `LOG_DIR=logs`
+* `LOG_LEVEL=INFO`
+* `LOG_ROTATION_MODE=time|size` (default `time`)
+* If `time`: `LOG_RETENTION_DAYS=30`
+* If `size`: `LOG_MAX_BYTES=10485760` and `LOG_BACKUP_COUNT=5`
+
+### 6.3 Log format (text + key=value)
+
+**Format template** (example):
+
+```
+2025-12-17T07:12:03.214Z | INFO  | execution.trade_executor | precheck_passed |
+run_id=... cycle_id=... instrument_id=Stock:211 uic=211 asset_type=Stock
+external_reference=ATB-... client_key=*** account_key=*** http_status=200
 ```
 
-### 3. Data Retrieval
-```python
-logger.info(f"Fetching market data for {len(instruments)} instruments")
-logger.info(
-    f"Quote fetched: instrument_id={instrument_id}, asset_type={asset_type}, "
-    f"uic={uic}, symbol={symbol}, bid={bid}, ask={ask}, timestamp={timestamp}"
-)
-logger.error(
-    f"Data fetch failed: instrument_id={instrument_id}, http_status={status}, "
-    f"error={error_message}"
-)
-```
+Rules:
 
-### 4. Signal Generation
-```python
-logger.info(f"Signals generated: {signal_count} BUY, {sell_count} SELL, {hold_count} HOLD")
-logger.info(
-    f"Signal: instrument_id={instrument_id}, symbol={symbol}, signal={signal}, "
-    f"reason={reason}"
-)
-```
+* The **message** is short and stable (used as a semantic event label).
+* Context is appended as `key=value` tokens.
+* Do not rely on JSON; keep it grep-able.
 
-### 5. Order Execution (Precheck + Placement)
-```python
-# Precheck
-logger.info(
-    f"Precheck: instrument_id={instrument_id}, asset_type={asset_type}, uic={uic}, "
-    f"symbol={symbol}, buy_sell={buy_sell}, amount={amount}, "
-    f"estimated_cost={cost}, is_valid={is_valid}"
-)
-logger.error(
-    f"Precheck failed: instrument_id={instrument_id}, symbol={symbol}, "
-    f"http_status={status}, error_code={error_code}, error_message={message}"
-)
+### 6.4 Required correlation fields (always present)
 
-# Placement
-logger.info(
-    f"Order placed: instrument_id={instrument_id}, symbol={symbol}, "
-    f"order_id={order_id}, buy_sell={buy_sell}, amount={amount}, "
-    f"status={status}, account_key={mask_sensitive(account_key)}"
-)
-logger.error(
-    f"Order placement failed: instrument_id={instrument_id}, symbol={symbol}, "
-    f"http_status={status}, error={error_message}"
-)
-```
+* `run_id` (UUID generated at process start)
+* `cycle_id` (monotonic counter or UUID per cycle)
+* `mode` (`dry_run=true|false`, `single_cycle=true|false`)
+* `env` (`SIM|LIVE`, if known)
+* `strategy` (strategy name/version)
 
-### 6. HTTP Errors
-```python
-logger.error(
-    f"HTTP error: method={method}, url={url}, status={status_code}, "
-    f"body={response_body}, retry_count={retry}"
-)
-```
+Implementation approach:
 
-### 7. Cycle Summary
-```python
-logger.info(
-    f"Cycle complete: duration={duration_seconds}s, signals={signal_count}, "
-    f"orders_placed={order_count}, errors={error_count}"
-)
-```
+* A `logging.Filter` ensures these fields exist on every record, with defaults if missing.
 
-## Scheduling Based on TRADING_HOURS_MODE
+### 6.5 Saxo-critical fields (present when applicable)
 
-### Mode: `always` (CryptoFX 24/7)
-Run bot every N minutes continuously:
+When an event touches an instrument, request, or order, include as many as relevant:
 
-**Linux/Mac (cron):**
-```bash
-# Run every 5 minutes, 24/7
-*/5 * * * * cd /path/to/trading_bot && /path/to/venv/bin/python main.py --single-cycle >> logs/cron.log 2>&1
-```
+**Instrument context**
 
-**Windows (Task Scheduler):**
-- Trigger: Daily at 00:00
-- Repeat every: 5 minutes
-- Duration: 24 hours
-- Expire: Never
+* `instrument_id` = `{AssetType}:{Uic}`
+* `asset_type`
+* `uic`
+* `symbol` (if known)
 
-### Mode: `fixed` (Equity Market Hours)
-Run bot only during configured hours:
+**Account context**
 
-**Example: US Market Hours (09:30-16:00 ET, weekdays)**
+* `client_key` (masked)
+* `account_key` (masked)
 
-**Linux/Mac (cron):**
-```bash
-# Run every minute from 09:30-16:00 ET, Monday-Friday
-*/1 9-16 * * 1-5 cd /path/to/trading_bot && /path/to/venv/bin/python main.py --single-cycle >> logs/cron.log 2>&1
+**HTTP / API context**
 
-# Or with specific timezone handling
-*/1 * * * * TZ=America/New_York [ $(date +\%H) -ge 9 ] && [ $(date +\%H) -lt 16 ] && cd /path/to/trading_bot && /path/to/venv/bin/python main.py --single-cycle
-```
+* `http_method`
+* `http_url_path` (path only, not full query with secrets)
+* `http_status`
+* `saxo_request_id` (if returned by Saxo headers; optional)
+* `rate_limit_remaining_*` and `rate_limit_reset_*` (if available)
 
-**Windows (Task Scheduler):**
-- Trigger: Daily at 09:30 AM
-- Repeat every: 1 minute
-- Duration: 6 hours 30 minutes (until 16:00)
-- Days: Monday, Tuesday, Wednesday, Thursday, Friday
+**Execution context**
 
-**Example: European Market Hours (08:00-16:30 CET, weekdays)**
-```bash
-# Run every minute from 08:00-16:30 CET, Monday-Friday
-*/1 8-16 * * 1-5 cd /path/to/trading_bot && /path/to/venv/bin/python main.py --single-cycle >> logs/cron.log 2>&1
-```
+* `external_reference` (your idempotency/correlation handle)
+* `order_id` (Saxo OrderId)
+* `precheck_ok` (true/false)
+* `disclaimer_required` (true/false)
+* `disclaimer_tokens_count`
+* `execution_outcome` (SUCCESS / FAILED / SKIPPED / RECONCILIATION_NEEDED)
+* `failure_reason` (stable enum-like string)
 
-### Mode: `instrument` (Future - Per-Instrument Sessions)
-Future enhancement: Query Saxo for trading sessions, schedule accordingly.
+### 6.6 Redaction and sensitive data handling
 
-## Random Delay Implementation
+Mandatory redaction targets:
 
-```python
-import random
-import time
+* OAuth tokens (access/refresh), app secrets, Authorization headers, cookies.
+* Any field matching patterns: `token`, `secret`, `authorization`, `bearer`, `refresh`, `password`.
 
-def add_jitter(max_seconds: int = 10):
-    """Add random delay to avoid exact-minute API bursts."""
-    jitter = random.randint(0, max_seconds)
-    logger.debug(f"Adding jitter: {jitter} seconds")
-    time.sleep(jitter)
+Masking policy (recommended):
 
-# Use at start of each cycle
-add_jitter()
-```
+* Keep first 3 and last 2 characters where safe; otherwise full mask.
+* Example: `ABCDEF123456` → `ABC***56`
+* AccountKey/ClientKey are treated as sensitive (mask by default).
 
-## Log Analysis Utilities
+### 6.7 Event taxonomy (minimum required events)
 
-### Example: Count Orders by Status
-```bash
-# Count successful order placements
-grep "Order placed" logs/bot.log | wc -l
+**Startup / config**
 
-# Count precheck failures
-grep "Precheck failed" logs/bot.log | wc -l
+* `startup_begin`
+* `startup_config_loaded`
+* `startup_config_invalid` (fatal)
+* `startup_ready`
 
-# Show HTTP errors with status codes
-grep "HTTP error" logs/bot.log | grep -oP 'status=\d+' | sort | uniq -c
-```
+**Auth**
 
-### Example: Extract Order IDs
-```bash
-# Extract all Saxo OrderIds
-grep "order_id=" logs/bot.log | grep -oP 'order_id=\d+' | sort | uniq
-```
+* `auth_mode_selected`
+* `auth_token_refresh_begin`
+* `auth_token_refresh_success`
+* `auth_token_refresh_failure` (fatal or recoverable depending on mode)
 
-### Example: Monitor Token Refresh
-```bash
-# Show OAuth refresh events
-grep "OAuth token refresh" logs/bot.log | tail -20
-```
+**Cycle**
 
-## Log Retention Policy
+* `cycle_begin`
+* `cycle_skip_outside_trading_hours`
+* `cycle_end` (include summary counters)
 
-### Retention Duration
-- **Minimum:** 30 days of logs
-- **Recommended:** 90 days for production systems
-- **Compliance:** Check regulatory requirements (may require longer)
+**Market data**
 
-### Rotation Strategy
-```python
-# Option 1: Size-based (10MB files, keep 5 backups = 50MB total)
-RotatingFileHandler('logs/bot.log', maxBytes=10*1024*1024, backupCount=5)
+* `marketdata_fetch_begin`
+* `marketdata_fetch_success` (counts)
+* `marketdata_fetch_partial` (missing instruments)
+* `marketdata_fetch_failure` (recoverable)
 
-# Option 2: Time-based (daily rotation, keep 30 days)
-from logging.handlers import TimedRotatingFileHandler
-TimedRotatingFileHandler('logs/bot.log', when='midnight', interval=1, backupCount=30)
-```
+**Strategy**
 
-### Archival
-```bash
-# Compress old logs monthly
-gzip logs/bot.log.2024-11-*
+* `strategy_signals_generated` (counts buy/sell/hold)
+* `strategy_signal_skipped_insufficient_data` (per instrument where relevant)
 
-# Move to archive directory
-mv logs/bot.log.*.gz logs/archive/
-```
+**Execution**
 
-## Error Notification (Optional)
+* `execution_intent_created`
+* `execution_precheck_begin`
+* `execution_precheck_passed`
+* `execution_precheck_failed`
+* `execution_disclaimer_required`
+* `execution_disclaimer_resolved`
+* `execution_disclaimer_blocked`
+* `execution_order_placed`
+* `execution_order_rejected`
+* `execution_reconcile_begin`
+* `execution_reconcile_result`
 
-### Email Alerts for Critical Errors
-```python
-from logging.handlers import SMTPHandler
+**Errors**
 
-# Add SMTP handler for CRITICAL errors
-smtp_handler = SMTPHandler(
-    mailhost=('smtp.gmail.com', 587),
-    fromaddr='bot@example.com',
-    toaddrs=['admin@example.com'],
-    subject='Trading Bot CRITICAL Error',
-    credentials=('user', 'password'),
-    secure=()
-)
-smtp_handler.setLevel(logging.CRITICAL)
-logger.addHandler(smtp_handler)
-```
+* `http_error` (status + safe response snippet)
+* `unexpected_exception` (stack trace, safe context)
 
-## Notes
-- External schedulers (cron/Task Scheduler) more reliable than internal loops
-- Each run is independent (prevents memory leaks, easier failure recovery)
-- Always use `--single-cycle` flag with schedulers (avoids infinite loops)
-- Log review is essential: check daily for errors and anomalies
-- Trading hours logic in orchestration (Epic 006) is primary; scheduling is secondary enforcement
-- For CryptoFX 24/7, consider alerting on unusual activity (e.g., no trades for 24h)
-- Mask sensitive data in logs, but keep full data in secure audit trail if needed
-- Consider log forwarding to centralized system for production deployments
+### 6.8 Non-blocking logging (recommended)
 
-## Future Enhancements
-- Structured logging (JSON format) for machine parsing
-- Real-time log streaming to monitoring dashboard
-- Automated log analysis (detect patterns, anomalies)
-- Performance metrics logging (API latency, cycle duration)
-- Integration with monitoring systems (Prometheus, Datadog)
-- Log-based alerts (e.g., >10 failed orders in 1 hour → alert)
+If the bot runs frequently or emits high volume logs, use:
+
+* `QueueHandler` in workers
+* `QueueListener` to write to file/console in a single thread
+
+This reduces the chance that file I/O delays impact timing-sensitive operations (especially around order placement).
+
+---
+
+## 7. Scheduling Specification
+
+### 7.1 Scheduling strategy (recommended)
+
+* Use OS scheduler to run **one trading cycle per invocation**:
+
+  * `python main.py --single-cycle [--dry-run]`
+* Let orchestrator apply `TRADING_HOURS_MODE` gating.
+* Benefits:
+
+  * avoids memory leaks / long-running drift
+  * isolates crashes to one cycle
+  * simplifies restart semantics
+
+### 7.2 Overlap prevention (mandatory)
+
+Overlapping invocations can cause duplicate orders and rate-limit spikes.
+
+Minimum requirement:
+
+* Introduce a lock around execution entrypoint.
+  Options:
+
+1. **Linux cron**: use `flock`:
+
+   ```
+   * * * * * flock -n /tmp/ai-tradebot.lock python /path/main.py --single-cycle
+   ```
+2. **systemd**: use a lockfile in `ExecStartPre` or use `flock` in `ExecStart`.
+3. **Windows Task Scheduler**: configure “Do not start a new instance” if the task is already running (or emulate lockfile).
+
+### 7.3 Jitter (recommended)
+
+To avoid synchronized bursts against Saxo:
+
+* systemd: `RandomizedDelaySec=15` (or 5–30 seconds depending on interval)
+* cron/Windows: implement `--jitter-seconds-max` or an env var `SCHEDULER_JITTER_SECONDS` read by main and applied as a pre-cycle sleep.
+
+### 7.4 Scheduling by `TRADING_HOURS_MODE`
+
+* `always`: schedule continuously at fixed interval (e.g., every 1–5 minutes).
+* `fixed`: schedule only during the fixed window **or** schedule broadly and let orchestrator skip outside hours. Recommended: broad schedule + internal gating to reduce scheduler complexity.
+* `instrument`: schedule broadly; orchestrator filters instruments by schedule.
+
+### 7.5 Platform runbooks (deliverables)
+
+#### Linux (preferred): systemd
+
+Deliver:
+
+* `docs/runbooks/systemd-ai-tradebot.service`
+* `docs/runbooks/systemd-ai-tradebot.timer`
+
+Key characteristics:
+
+* `Restart=on-failure`
+* environment file support (e.g., `EnvironmentFile=/path/.env`)
+* jitter via timer
+* logs to both file and journal (optional)
+
+#### Linux (fallback): cron
+
+Deliver:
+
+* `docs/runbooks/cron.md` with:
+
+  * every-minute example with lock + jitter
+  * weekday-only example for equities windows
+  * environment loading guidance
+
+#### Windows: Task Scheduler
+
+Deliver:
+
+* `docs/runbooks/windows-task-scheduler.md` with:
+
+  * “repeat task every X minutes for Y hours”
+  * “do not start new instance” overlap prevention
+  * environment variable setup guidance
+
+---
+
+## 8. Implementation Plan (work items within Epic 007)
+
+### 8.1 Add/extend modules
+
+* `logging_config.py`
+
+  * `setup_logging(...)`
+  * `mask_sensitive(...)`
+  * `build_log_context(run_id, cycle_id, ...)`
+* `log_context.py` (optional)
+
+  * `get_logger(**context) -> LoggerAdapter`
+* `runbooks/` docs for schedulers
+* Minimal utilities:
+
+  * `scripts/log_tools.py` (optional): grep helpers, order-id extraction patterns
+
+### 8.2 Update call sites to use context consistently
+
+* `main.py` / orchestrator:
+
+  * generate `run_id`, `cycle_id`
+  * pass context into market data, strategy, execution
+* execution module:
+
+  * ensure it logs `external_reference`, `order_id`, `instrument_id`, and final `execution_outcome`
+
+### 8.3 Add tests
+
+* Unit tests:
+
+  * redaction function masks tokens and keys
+  * log formatter includes required fields
+  * rotation/retention configured correctly
+  * queue logging doesn’t drop messages (if enabled)
+* Smoke test:
+
+  * run one cycle (mocked) and assert key events emitted
+
+---
+
+## 9. Success Criteria
+
+Epic 007 is complete when:
+
+1. Logs are written to `logs/` with rotation and >= 30-day retention by default.
+2. Every cycle produces clearly correlated logs using `run_id` and `cycle_id`.
+3. Saxo-critical identifiers are logged where relevant (instrument/order/request), with masking applied.
+4. OAuth refresh, precheck, disclaimer, placement, reconciliation, and HTTP errors are all logged with actionable context.
+5. Scheduling runbooks exist for systemd, cron, and Windows Task Scheduler, including:
+
+   * single-cycle invocation
+   * overlap prevention
+   * jitter recommendation
+   * mapping to `TRADING_HOURS_MODE`
+
+---
+
+## 10. Acceptance Criteria (testable)
+
+### Logging
+
+* A new run creates/updates `logs/bot.log`.
+* After rotation, old files are retained per policy (default 30 days).
+* A log search for a given `external_reference` yields:
+
+  * the intent creation
+  * precheck outcome
+  * disclaimer result (if any)
+  * placement and final execution outcome
+* Sensitive values are masked in all log output (validated by unit test).
+
+### Scheduling
+
+* Provided runbooks can be followed to schedule:
+
+  * “every 5 minutes” (always mode)
+  * “weekday fixed window” (fixed mode)
+* Two concurrent invocations do not overlap (lock proven by documented approach).
+
+---
+
+## 11. Risks and Mitigations
+
+* **Risk: accidental secret leakage**
+  Mitigation: central redaction + tests; never log raw headers; safe response snippet truncation.
+
+* **Risk: overlapping runs cause duplicate trades**
+  Mitigation: mandatory lockfile strategy in runbooks; Task Scheduler “no new instance.”
+
+* **Risk: log file growth / disk exhaustion**
+  Mitigation: rotation + retention defaults; size-based option.
+
+* **Risk: logging overhead affects latency**
+  Mitigation: optional QueueHandler; keep DEBUG off by default.
+
+---
+
+## 12. Deliverables
+
+1. Logging configuration module + integration across orchestrator/execution.
+2. Default log directory + rotation + retention.
+3. Redaction/masking utilities + tests.
+4. Runbooks: systemd, cron, Windows Task Scheduler.
+5. Minimal log-analysis helpers (optional, but recommended).
