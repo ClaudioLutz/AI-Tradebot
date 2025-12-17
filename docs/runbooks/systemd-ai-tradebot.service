@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Tradebot Single Cycle
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-tradebot
+User=tradebot
+Group=tradebot
+# Load env vars
+EnvironmentFile=/opt/ai-tradebot/.env
+# Exec
+ExecStart=/usr/bin/python3 main.py --single-cycle --config prod
+# Jitter is handled by the Timer, but we can also add a pre-sleep here if needed

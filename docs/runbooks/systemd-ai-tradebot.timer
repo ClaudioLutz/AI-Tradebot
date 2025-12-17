@@ -1,0 +1,12 @@
+[Unit]
+Description=Run AI Tradebot every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+# Jitter to reduce burstiness
+RandomizedDelaySec=30
+Unit=ai-tradebot.service
+
+[Install]
+WantedBy=timers.target
