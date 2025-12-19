@@ -456,6 +456,7 @@ def get_latest_quotes(
     instruments: List[Dict[str, Any]],
     field_groups: Optional[str] = None,
     include_rate_limit_info: bool = False,
+    saxo_client: Optional[SaxoClient] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch latest quote snapshots for instruments (prefer batched InfoPrices list).
 
@@ -468,7 +469,7 @@ def get_latest_quotes(
     `rate_limit_info` for the request that produced it (or empty dict for invalid inputs).
     """
 
-    client = SaxoClient()
+    client = saxo_client if saxo_client else SaxoClient()
 
     # Group instruments by asset_type
     grouped: Dict[str, List[Dict[str, Any]]] = {}
@@ -715,6 +716,7 @@ def get_ohlc_bars(
     field_groups: Optional[str] = None,
     existing_bars: Optional[List[Dict[str, Any]]] = None,
     include_rate_limit_info: bool = False,
+    saxo_client: Optional[SaxoClient] = None,
 ) -> Dict[str, Any]:
     """Fetch OHLC bars for a single instrument using Saxo Chart v3.
 
@@ -725,7 +727,7 @@ def get_ohlc_bars(
     Returns a container with instrument metadata and normalized bars.
     """
 
-    client = SaxoClient()
+    client = saxo_client if saxo_client else SaxoClient()
 
     asset_type = instrument.get("asset_type")
     uic = instrument.get("uic")

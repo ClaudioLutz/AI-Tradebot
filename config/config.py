@@ -287,15 +287,20 @@ class Config:
                 raise ConfigurationError(f"Duplicate watchlist instrument: {symbol} ({asset_type})")
             seen.add(key)
 
-    def resolve_instruments(self, force_refresh: bool = False) -> None:
+    def resolve_instruments(self, force_refresh: bool = False, client: Optional[Any] = None) -> None:
         """Resolve instruments in watchlist to add missing UICs.
 
         Uses Saxo /ref/v1/instruments and caches results in .cache/instruments.json.
+
+        Args:
+            force_refresh: If True, ignore cache and re-query.
+            client: Optional shared SaxoClient instance. If None, creates a new one.
         """
 
         from data.saxo_client import SaxoClient
 
-        client = SaxoClient()  # uses auth.saxo_oauth.get_access_token internally
+        if client is None:
+            client = SaxoClient()  # uses auth.saxo_oauth.get_access_token internally
 
         for inst in self.watchlist:
             symbol = inst["symbol"]

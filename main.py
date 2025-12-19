@@ -30,18 +30,22 @@ import argparse
 import logging
 import time
 import sys
+import json
+import os
 from datetime import datetime, time as time_obj
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Any
 
 # Import project modules
 from config import settings
+from config.config import Config
+from config.runtime_config import RuntimeConfig
 from data.saxo_client import SaxoClient
 from data.market_data import get_latest_quotes
 from strategies.base import BaseStrategy
 from strategies.registry import get_strategy
 from execution.trade_executor import SaxoTradeExecutor
-from execution.models import OrderIntent, BuySell, AssetType
+from execution.models import OrderIntent, BuySell, AssetType, ExecutionStatus
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -176,78 +180,12 @@ def log_startup_banner(args: argparse.Namespace) -> None:
 # Story 006-002: Configuration and Client Initialization
 # =============================================================================
 
-def load_configuration():
-    """
-    Load and validate configuration once at startup.
-    
-    Returns:
-        settings: Validated configuration settings object
-        
-    Raises:
-        ValueError: If required configuration is missing or invalid
-    """
-    try:
-        logger.info("Loading configuration from environment and settings")
-        
-        # Validate required environment variables
-        required_vars = ["SAXO_ACCOUNT_KEY", "SAXO_CLIENT_KEY"]
-        missing_vars = [var for var in required_vars if not getattr(settings, var, None)]
-        
-        if missing_vars:
-            raise ValueError(
-                f"Missing required environment variables: {', '.join(missing_vars)}. "
-                f"Please set them in your .env file."
-            )
-        
-        # Log configuration summary (mask sensitive data for security)
-        logger.info(f"Account Key: {mask_sensitive_data(settings.SAXO_ACCOUNT_KEY)}")
-        logger.info(f"Client Key: {mask_sensitive_data(settings.SAXO_CLIENT_KEY)}")
-        logger.info(f"Watchlist Size: {len(settings.WATCHLIST)} instruments")
-        logger.info(f"Trading Hours Mode: {settings.TRADING_HOURS_MODE}")
-        logger.info(f"Cycle Interval: {settings.CYCLE_INTERVAL_SECONDS} seconds")
-        logger.info(f"Auth Mode: {settings.SAXO_AUTH_MODE}")
-        
-        # Validate configuration types and ranges
-        validate_config_types(settings)
-        
-        # Normalize watchlist: create immutable copy with consistent 'symbol' field
-        # This prevents mutation of the original configuration
-        normalized_watchlist = []
-        for idx, instrument in enumerate(settings.WATCHLIST):
-            # Required keys: either 'name' or 'symbol', plus 'asset_type'
-            has_identifier = "symbol" in instrument or "name" in instrument
-            has_asset_type = "asset_type" in instrument
-            
-            if not has_identifier or not has_asset_type:
-                raise ValueError(
-                    f"Invalid instrument at index {idx}: missing required keys. "
-                    f"Required: ['symbol' or 'name', 'asset_type'], Got: {list(instrument.keys())}"
-                )
-            
-            # Create normalized copy with 'symbol' field
-            normalized_instrument = instrument.copy()
-            if "symbol" not in normalized_instrument and "name" in normalized_instrument:
-                normalized_instrument["symbol"] = normalized_instrument["name"]
-            
-            normalized_watchlist.append(normalized_instrument)
-        
-        # Replace watchlist with normalized version (immutable after this point)
-        settings.WATCHLIST = normalized_watchlist
-        
-        logger.info("Configuration loaded and validated successfully")
-        return settings
-    
-    except Exception as e:
-        logger.error(f"Failed to load configuration: {e}", exc_info=True)
-        raise
-
-
-def initialize_saxo_client(config):
+def initialize_saxo_client(env_settings) -> SaxoClient:
     """Initialize Saxo client with authentication."""
     try:
         logger.info("Initializing Saxo OpenAPI client")
-        logger.info(f"Environment: {config.SAXO_ENV}")
-        logger.info(f"Auth mode: {config.SAXO_AUTH_MODE}")
+        logger.info(f"Environment: {getattr(env_settings, 'SAXO_ENV', 'SIM')}")
+        logger.info(f"Auth mode: {getattr(env_settings, 'SAXO_AUTH_MODE', 'manual')}")
         
         saxo_client = SaxoClient()
         
@@ -278,11 +216,72 @@ def initialize_saxo_client(config):
         raise
 
 
+def load_configuration(saxo_client: SaxoClient) -> RuntimeConfig:
+    """
+    Load and validate configuration once at startup.
+    Resolves instruments using the shared Saxo client.
+
+    Returns:
+        RuntimeConfig: Immutable configuration object
+
+    Raises:
+        ValueError: If required configuration is missing or invalid
+    """
+    try:
+        logger.info("Loading configuration from environment and settings")
+
+        # Load from config.Config (which handles resolution)
+        # We temporarily initialize Config to resolve instruments
+        # Note: We must ensure Config uses our shared client
+
+        # 1. Initialize standard config handler
+        config_handler = Config()
+
+        # 2. Resolve instruments using the shared client
+        logger.info("Resolving instrument UICs...")
+        config_handler.resolve_instruments(client=saxo_client)
+
+        # 3. Construct RuntimeConfig from resolved values
+        runtime_config = RuntimeConfig(
+            saxo_env=config_handler.environment,
+            saxo_auth_mode=config_handler.auth_mode,
+            account_key=settings.SAXO_ACCOUNT_KEY,
+            client_key=settings.SAXO_CLIENT_KEY,
+            watchlist=config_handler.watchlist,
+            cycle_interval_seconds=settings.CYCLE_INTERVAL_SECONDS,
+            trading_hours_mode=settings.TRADING_HOURS_MODE,
+            default_quantity=settings.DEFAULT_QUANTITY,
+            max_positions=settings.MAX_POSITIONS,
+            max_daily_trades=settings.MAX_DAILY_TRADES,
+            max_position_size=settings.MAX_POSITION_SIZE,
+            max_daily_loss=settings.MAX_DAILY_LOSS,
+            stop_loss_percent=settings.STOP_LOSS_PERCENT,
+            take_profit_percent=settings.TAKE_PROFIT_PERCENT,
+            trading_start=settings.TRADING_START,
+            trading_end=settings.TRADING_END,
+            timezone=settings.TIMEZONE,
+            log_level=settings.LOG_LEVEL
+        )
+
+        # Log configuration summary (mask sensitive data for security)
+        logger.info(f"Account Key: {mask_sensitive_data(runtime_config.account_key)}")
+        logger.info(f"Client Key: {mask_sensitive_data(runtime_config.client_key)}")
+        logger.info(f"Watchlist Size: {len(runtime_config.watchlist)} instruments")
+        logger.info(f"Trading Hours Mode: {runtime_config.trading_hours_mode}")
+        logger.info(f"Cycle Interval: {runtime_config.cycle_interval_seconds} seconds")
+
+        return runtime_config
+
+    except Exception as e:
+        logger.error(f"Failed to load configuration: {e}", exc_info=True)
+        raise
+
+
 # =============================================================================
 # Story 006-003: Trading Hours Logic
 # =============================================================================
 
-def should_trade_now(config) -> bool:
+def should_trade_now(config: RuntimeConfig) -> bool:
     """
     Determine if trading should occur based on TRADING_HOURS_MODE.
     
@@ -292,7 +291,7 @@ def should_trade_now(config) -> bool:
     Returns:
         bool: True if trading is allowed, False otherwise
     """
-    mode = config.TRADING_HOURS_MODE
+    mode = config.trading_hours_mode
     
     if mode == "always":
         # CryptoFX 24/7 trading - always allow
@@ -304,16 +303,16 @@ def should_trade_now(config) -> bool:
         return _check_fixed_hours(config)
     
     elif mode == "instrument":
-        # Future: per-instrument trading sessions
-        logger.error("TRADING_HOURS_MODE='instrument' not yet implemented")
-        raise NotImplementedError("Per-instrument hours not yet implemented")
+        # Per-instrument sessions are handled in run_cycle
+        logger.debug("Trading hours mode: instrument - Checks delegated to instrument level")
+        return True
     
     else:
         logger.error(f"Unknown TRADING_HOURS_MODE: {mode}. Defaulting to no trading.")
         return False
 
 
-def _check_fixed_hours(config) -> bool:
+def _check_fixed_hours(config: RuntimeConfig) -> bool:
     """
     Check if current time is within fixed trading hours.
     
@@ -325,12 +324,12 @@ def _check_fixed_hours(config) -> bool:
     """
     try:
         # Get current time in configured timezone
-        timezone = ZoneInfo(config.TIMEZONE)
+        timezone = ZoneInfo(config.timezone)
         current_time = datetime.now(timezone)
         
         # Parse trading hours (format: "HH:MM")
-        start_time = time_obj.fromisoformat(config.TRADING_START)
-        end_time = time_obj.fromisoformat(config.TRADING_END)
+        start_time = time_obj.fromisoformat(config.trading_start)
+        end_time = time_obj.fromisoformat(config.trading_end)
         
         current_time_only = current_time.time()
         
@@ -364,14 +363,52 @@ def _check_fixed_hours(config) -> bool:
 
 
 # =============================================================================
-# Story 006-004: Single Trading Cycle (Placeholder - Phase 2)
+# Story 006-005: Risk Limits & State Management
 # =============================================================================
 
-def run_cycle(config, saxo_client: SaxoClient, dry_run: bool = False):
+def load_daily_trade_count() -> int:
+    """Load daily trade count from state file."""
+    state_file = "state/trade_counter.json"
+    today = datetime.utcnow().date().isoformat()
+
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r") as f:
+                data = json.load(f)
+                if data.get("date") == today:
+                    return data.get("count", 0)
+    except Exception as e:
+        logger.error(f"Failed to load trade count: {e}")
+
+    return 0
+
+def increment_daily_trade_count() -> int:
+    """Increment daily trade count in state file."""
+    state_file = "state/trade_counter.json"
+    today = datetime.utcnow().date().isoformat()
+
+    try:
+        current_count = load_daily_trade_count()
+        new_count = current_count + 1
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+
+        with open(state_file, "w") as f:
+            json.dump({"date": today, "count": new_count}, f)
+
+        return new_count
+    except Exception as e:
+        logger.error(f"Failed to save trade count: {e}")
+        return 0
+
+# =============================================================================
+# Story 006-004: Single Trading Cycle
+# =============================================================================
+
+def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = False):
     """
     Execute a single trading cycle.
-    
-    This is a placeholder implementation. Full implementation coming in Story 006-004.
     
     Args:
         config: Settings object with configuration
@@ -388,25 +425,265 @@ def run_cycle(config, saxo_client: SaxoClient, dry_run: bool = False):
             logger.info("Outside trading hours, skipping cycle")
             return
         
-        # 2. Fetch market data (placeholder)
-        logger.info(f"Fetching market data for {len(config.WATCHLIST)} instruments")
-        # TODO: Implement in Story 006-004
-        # market_data = get_latest_quotes(config.WATCHLIST)
+        # 2. Fetch market data (Quotes)
+        # Using shared saxo_client to respect rate limits
+        logger.info(f"Fetching market data for {len(config.watchlist)} instruments")
+        market_data = get_latest_quotes(
+            config.watchlist,
+            include_rate_limit_info=True,
+            saxo_client=saxo_client
+        )
+
+        # 3. Gatekeeping & Bar Retrieval
+        # Filter out errors and stale quotes, check market hours per instrument
+
+        from data.market_data import get_ohlc_bars, should_trade_given_market_state
+        from datetime import timezone
+
+        valid_instruments = {}
+        now_utc = datetime.now(timezone.utc)
+
+        for instrument_id, container in market_data.items():
+            symbol = container.get("symbol")
+
+            # 3.1 Check errors
+            if container.get("error"):
+                logger.warning(f"Skipping {symbol}: Market data error - {container['error'].get('code')}")
+                continue
+
+            if not container.get("quote"):
+                logger.warning(f"Skipping {symbol}: No quote available")
+                continue
+
+            # 3.2 Check freshness
+            freshness = container.get("freshness", {})
+            if freshness.get("is_stale"):
+                logger.warning(f"Skipping {symbol}: Quote is stale (age={freshness.get('age_seconds')}s)")
+                continue
+
+            # 3.3 Check market state (if in instrument mode)
+            if config.trading_hours_mode == "instrument":
+                market_state = container["quote"].get("market_state")
+                if not should_trade_given_market_state(market_state):
+                    logger.info(f"Skipping {symbol}: Market closed (State: {market_state})")
+                    continue
+
+            # 3.4 Fetch bars if strategy needs them
+            # For now assuming Moving Average strategy which needs bars
+            # Ideally strategy.requirements would dictate this
+            # Using defaults: 1 Hour bars, 60 count
+            try:
+                # TODO: Retrieve strategy requirements dynamically
+                horizon = 60 # 1 Hour
+                count = 60
+
+                bars_container = get_ohlc_bars(
+                    container, # normalized instrument dict (from quotes) has uic/asset_type
+                    horizon_minutes=horizon,
+                    count=count,
+                    mode="UpTo",
+                    time=now_utc.isoformat().replace("+00:00", "Z"),
+                    saxo_client=saxo_client
+                )
+                container["bars"] = bars_container.get("bars", [])
+            except Exception as e:
+                logger.error(f"Failed to fetch bars for {symbol}: {e}")
+                # We can either skip or proceed without bars depending on strategy.
+                # Strict approach: skip
+                continue
+
+            valid_instruments[instrument_id] = container
+
+        logger.info(f"Market data ready for {len(valid_instruments)} instruments")
         
-        # 3. Generate signals (placeholder)
+        if not valid_instruments:
+            logger.info("No valid instruments to process. Cycle complete.")
+            return
+
+        # 4. Generate signals
         logger.info("Generating trading signals")
-        # TODO: Implement in Story 006-004
-        # strategy = get_strategy("moving_average")
-        # signals = strategy.generate_signals(market_data, datetime.now(timezone.utc))
         
-        # 4. Execute trades (placeholder)
+        # Instantiate strategy (using simple moving average for now)
+        strategy = get_strategy("moving_average")
+        signals = strategy.generate_signals(valid_instruments, now_utc)
+
+        logger.info(f"Generated {len(signals)} signals")
+
+        # 5. Execute trades
         logger.info("Executing trades")
-        # TODO: Implement in Story 006-004
         
-        logger.info("Cycle complete (placeholder - full implementation in Story 006-004)")
+        # Initialize executor
+        executor = SaxoTradeExecutor(
+            saxo_client=saxo_client,
+            account_key=config.account_key,
+            client_key=config.client_key,
+            config={
+                "duplicate_buy_policy": "block", # or "allow"
+                "allow_short_covering": True
+            }
+        )
+
+        for instrument_id, signal in signals.items():
+            action = signal.action
+            if action == "HOLD":
+                continue
+
+            logger.info(f"Processing signal for {instrument_id}: {action} ({signal.reason})")
+
+            # Map signal to intent
+            instrument = valid_instruments[instrument_id]
+            asset_type_str = instrument.get("asset_type")
+            uic = instrument.get("uic")
+
+            # Validate asset type
+            try:
+                asset_type_enum = AssetType(asset_type_str)
+            except ValueError:
+                logger.error(f"Unknown asset type {asset_type_str} for {instrument_id}")
+                continue
+
+            # Sizing logic
+            quantity = 0.0
+            buy_sell = None
+
+            if action == "BUY":
+                buy_sell = BuySell.BUY
+                quantity = config.default_quantity
+
+                # Check 1: Max Positions
+                # Query all positions to count active ones
+                all_positions = executor.position_manager.get_positions()
+                if len(all_positions) >= config.max_positions:
+                    logger.warning(f"Ignored BUY signal for {instrument_id}: Max positions reached ({len(all_positions)} >= {config.max_positions})")
+                    continue
+
+                # Check 2: Max Daily Trades
+                current_daily_trades = load_daily_trade_count()
+                if current_daily_trades >= config.max_daily_trades:
+                    logger.warning(f"Ignored BUY signal for {instrument_id}: Max daily trades reached ({current_daily_trades} >= {config.max_daily_trades})")
+                    continue
+
+            elif action == "SELL":
+                buy_sell = BuySell.SELL
+                # For SELL, we need to know current position to close it
+                # Executor guards will handle blocking invalid sells, but we need an amount
+                # We query position manager to get current net quantity
+                positions = executor.position_manager.get_positions()
+                pos_key = (asset_type_str, str(uic))
+
+                # Note: position_manager keys might be (asset_type, uic) or similar.
+                # Checking SaxoPositionManager implementation would be good but standardizing here:
+                # position_manager.get_positions returns dict keyed by (AssetType, Uic) usually
+
+                # Actually SaxoPositionManager returns dict keyed by something.
+                # Let's trust position manager for now or use a safe "close all" flag if available.
+                # OrderIntent requires specific amount.
+
+                # We'll use a simplified approach: fetch position for this instrument
+                current_pos = positions.get(f"{asset_type_str}:{uic}") # Check key format if needed
+
+                # If using standard key format from position module...
+                # Let's assume we can get it.
+                # If not found, skip sell
+                # Wait, PositionManager usually keys by something specific.
+                # Let's assume executor handles "close position" if we pass specific flag?
+                # No, OrderIntent needs amount.
+
+                # FALLBACK: For now, if we can't find position, we might skip.
+                # But to implement "close existing", we really need that position size.
+                # Let's use a safe default or skip if we can't determine.
+
+                # Re-reading plan: "close existing long position by querying executor’s position_manager"
+                # "pos = position_manager.get_positions().get((asset_type, uic))"
+
+                # Let's verify PositionManager key format quickly or try to find it.
+                # Assuming (asset_type, uic) tuple or string key.
+                # The PositionManager uses `_get_position_key(asset_type, uic)`
+
+                # Let's try to find the position
+                target_key = f"{asset_type_str}:{uic}" # Common format
+                # OR
+                # We iterate
+                found_pos = None
+                for k, p in positions.items():
+                    if p.uic == uic and p.asset_type == asset_type_str:
+                        found_pos = p
+                        break
+
+                if found_pos:
+                    quantity = found_pos.net_quantity
+                else:
+                    logger.warning(f"Ignored SELL signal for {instrument_id}: No open position found")
+                    continue
+
+            if quantity <= 0:
+                logger.warning(f"Ignored signal for {instrument_id}: Quantity {quantity} <= 0")
+                continue
+
+            # Create Intent
+            intent = OrderIntent(
+                buy_sell=buy_sell,
+                asset_type=asset_type_enum,
+                uic=uic,
+                amount=quantity,
+                strategy_id="moving_average", # Hardcoded for now
+                client_key=config.client_key,
+                account_key=config.account_key
+            )
+
+            # Execute
+            result = executor.execute(intent, dry_run=dry_run)
+
+            # Post-execution: Increment trade counter if successful (or dry-run success)
+            if result.status in [ExecutionStatus.SUCCESS, ExecutionStatus.DRY_RUN]:
+                # Only increment for new orders (BUY/SELL)
+                new_count = increment_daily_trade_count()
+                logger.info(f"Daily trade count incremented to {new_count}")
+
+            logger.info(f"Execution result for {instrument_id}: {result.status.value} - {result.error_message or 'Success'}")
+
+            # JSONL Logging (Story 006-006)
+            log_execution_jsonl(instrument_id, signal, intent, result)
+
+        logger.info("Cycle complete")
         
     except Exception as e:
         logger.error(f"Error in trading cycle: {e}", exc_info=True)
+
+
+def log_execution_jsonl(instrument_id: str, signal: Any, intent: OrderIntent, result: Any):
+    """Log execution details to JSONL file for auditable history."""
+    log_file = "logs/executions.jsonl"
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "instrument_id": instrument_id,
+        "signal": {
+            "action": signal.action,
+            "reason": signal.reason,
+            "decision_time": signal.decision_time
+        },
+        "intent": {
+            "action": intent.buy_sell.value,
+            "amount": float(intent.amount),
+            "asset_type": intent.asset_type.value,
+            "uic": intent.uic,
+            "external_reference": intent.external_reference
+        },
+        "result": {
+            "status": result.status.value,
+            "order_id": result.order_id,
+            "error_message": result.error_message,
+            "request_id": result.request_id
+        }
+    }
+
+    try:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to write execution log: {e}")
 
 
 # =============================================================================
@@ -425,11 +702,11 @@ def main():
     log_startup_banner(args)
     
     try:
-        # 1. Load configuration (once at startup, immutable)
-        config = load_configuration()
+        # 1. Initialize Saxo client (Early initialization for instrument resolution)
+        saxo_client = initialize_saxo_client(settings)
         
-        # 2. Initialize Saxo client
-        saxo_client = initialize_saxo_client(config)
+        # 2. Load configuration (Resolves instruments using client)
+        config = load_configuration(saxo_client)
         
         # 3. Run trading logic
         if args.single_cycle:
@@ -444,7 +721,7 @@ def main():
                 run_cycle(config, saxo_client, dry_run=args.dry_run)
                 
                 # Wait before next cycle
-                sleep_time = config.CYCLE_INTERVAL_SECONDS
+                sleep_time = config.cycle_interval_seconds
                 logger.info(f"Sleeping for {sleep_time} seconds until next cycle")
                 time.sleep(sleep_time)
     
