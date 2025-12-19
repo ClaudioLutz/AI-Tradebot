@@ -46,8 +46,12 @@ MANIFEST
 *~
 
 # Logs
-logs/*.log
+logs/
 *.log
+
+# State
+state/
+!state/*.py
 
 # OS
 .DS_Store

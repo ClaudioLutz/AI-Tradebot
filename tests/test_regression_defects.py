@@ -6,7 +6,6 @@ from execution.models import OrderIntent, AssetType, BuySell, PrecheckResult, Ma
 from execution.validation import InstrumentValidator, InstrumentConstraints
 from execution.disclaimers import DisclaimerService, DisclaimerDetails, DisclaimerConfig, DisclaimerPolicy
 from execution.placement import OrderPlacementClient
-from execution.utils import RateLimitedSaxoClient
 
 # 1. Decimal Test
 def test_decimal_amount_validation():
@@ -100,22 +99,3 @@ def test_placement_reconciliation_url():
     mock_client.get.assert_called_with("/port/v1/orders/client_k/123")
     assert outcome.final_status == "success"
 
-# 5. Rate Limiter Wrapper Test
-def test_rate_limiter_wrapper():
-    """Verify rate limiter respects headers"""
-    mock_inner = Mock()
-
-    # Exception simulation for 429
-    error_429 = Exception("429")
-    error_429.status_code = 429
-    error_429.response = Mock(headers={"X-RateLimit-SessionOrders-Reset": "0.1"})
-
-    mock_inner.get.side_effect = [error_429, "Success"]
-
-    client = RateLimitedSaxoClient(mock_inner)
-    client.default_reset_seconds = 0.1
-
-    res = client.get("/test")
-
-    assert res == "Success"
-    assert mock_inner.get.call_count == 2

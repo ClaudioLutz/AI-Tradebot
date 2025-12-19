@@ -55,6 +55,10 @@ class PositionManager:
         self._position_cache: Dict[Tuple[str, int], Position] = {}
         self._cache_timestamp: Optional[datetime] = None
 
+    def get_position(self, asset_type: str, uic: int) -> Optional[Position]:
+        """Helper to get a single position by key."""
+        return self._position_cache.get((asset_type, uic))
+
     def get_positions(self, force_refresh: bool = False) -> Dict[Tuple[str, int], Position]:
         """
         Fetch and cache positions keyed by (AssetType, Uic)

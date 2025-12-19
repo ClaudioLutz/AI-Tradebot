@@ -8,6 +8,7 @@ components, ensuring immutability and testability.
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import List, Dict, Any, Optional
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class RuntimeConfig:
     watchlist: List[Dict[str, Any]]
     cycle_interval_seconds: int
     trading_hours_mode: str
-    default_quantity: float
+    default_quantity: Decimal
 
     # Risk Management
     max_positions: int

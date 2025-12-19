@@ -1,5 +1,6 @@
 import pytest
 import time
+from decimal import Decimal
 from execution.models import OrderIntent, AssetType, BuySell, OrderType, OrderDurationType
 from execution.utils import intent_to_saxo_order_request, generate_request_id, generate_external_reference
 
@@ -12,7 +13,7 @@ def test_external_reference_max_length():
             asset_type=AssetType.STOCK,
             uic=211,
             buy_sell=BuySell.BUY,
-            amount=100,
+            amount=Decimal("100"),
             external_reference="x" * 51  # Too long
         )
 
@@ -24,7 +25,7 @@ def test_intent_to_saxo_request_mapping():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal("100"),
         external_reference="E005:TEST:211:abc12",
         manual_order=True
     )
@@ -35,7 +36,7 @@ def test_intent_to_saxo_request_mapping():
     assert request["AssetType"] == "Stock"
     assert request["Uic"] == 211
     assert request["BuySell"] == "Buy"
-    assert request["Amount"] == 100
+    assert request["Amount"] == Decimal("100")
     assert request["OrderType"] == "Market"
     assert request["ExternalReference"] == "E005:TEST:211:abc12"
     assert request["ManualOrder"] is True
@@ -60,7 +61,7 @@ def test_market_order_enforces_day_order():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100,
+        amount=Decimal("100"),
         order_type=OrderType.MARKET,
     )
     # The default is DayOrder, so let's try to change it

@@ -32,6 +32,8 @@ import time
 import sys
 import json
 import os
+from decimal import Decimal
+from pathlib import Path
 from datetime import datetime, time as time_obj
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List, Any
@@ -46,6 +48,8 @@ from strategies.base import BaseStrategy
 from strategies.registry import get_strategy
 from execution.trade_executor import SaxoTradeExecutor
 from execution.models import OrderIntent, BuySell, AssetType, ExecutionStatus
+from execution.intent_mapper import signal_to_intent
+from state.trade_counter import TradeCounter
 
 # Module logger
 logger = logging.getLogger(__name__)
@@ -366,41 +370,7 @@ def _check_fixed_hours(config: RuntimeConfig) -> bool:
 # Story 006-005: Risk Limits & State Management
 # =============================================================================
 
-def load_daily_trade_count() -> int:
-    """Load daily trade count from state file."""
-    state_file = "state/trade_counter.json"
-    today = datetime.utcnow().date().isoformat()
-
-    try:
-        if os.path.exists(state_file):
-            with open(state_file, "r") as f:
-                data = json.load(f)
-                if data.get("date") == today:
-                    return data.get("count", 0)
-    except Exception as e:
-        logger.error(f"Failed to load trade count: {e}")
-
-    return 0
-
-def increment_daily_trade_count() -> int:
-    """Increment daily trade count in state file."""
-    state_file = "state/trade_counter.json"
-    today = datetime.utcnow().date().isoformat()
-
-    try:
-        current_count = load_daily_trade_count()
-        new_count = current_count + 1
-
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-
-        with open(state_file, "w") as f:
-            json.dump({"date": today, "count": new_count}, f)
-
-        return new_count
-    except Exception as e:
-        logger.error(f"Failed to save trade count: {e}")
-        return 0
+# Logic moved to state/trade_counter.py
 
 # =============================================================================
 # Story 006-004: Single Trading Cycle
@@ -425,6 +395,17 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
             logger.info("Outside trading hours, skipping cycle")
             return
         
+        # Initialize Trade Counter
+        counter = TradeCounter(Path("state/trade_counter.json"))
+        daily_counts = counter.load()
+        today_count = counter.get_today(daily_counts)
+        logger.info(f"Daily trade count: {today_count}/{config.max_daily_trades}")
+
+        # Gate check: Daily Limit
+        if today_count >= config.max_daily_trades:
+            logger.warning("Blocked: max_daily_trades reached", extra={"today_count": today_count})
+            return
+
         # 2. Fetch market data (Quotes)
         # Using shared saxo_client to respect rate limits
         logger.info(f"Fetching market data for {len(config.watchlist)} instruments")
@@ -435,13 +416,15 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
         )
 
         # 3. Gatekeeping & Bar Retrieval
-        # Filter out errors and stale quotes, check market hours per instrument
-
         from data.market_data import get_ohlc_bars, should_trade_given_market_state
         from datetime import timezone
 
         valid_instruments = {}
         now_utc = datetime.now(timezone.utc)
+
+        # Determine strategy requirements
+        strategy = get_strategy("moving_average")
+        bars_req = strategy.bar_requirements() if strategy.requires_bars() else None
 
         for instrument_id, container in market_data.items():
             symbol = container.get("symbol")
@@ -469,28 +452,21 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
                     continue
 
             # 3.4 Fetch bars if strategy needs them
-            # For now assuming Moving Average strategy which needs bars
-            # Ideally strategy.requirements would dictate this
-            # Using defaults: 1 Hour bars, 60 count
-            try:
-                # TODO: Retrieve strategy requirements dynamically
-                horizon = 60 # 1 Hour
-                count = 60
-
-                bars_container = get_ohlc_bars(
-                    container, # normalized instrument dict (from quotes) has uic/asset_type
-                    horizon_minutes=horizon,
-                    count=count,
-                    mode="UpTo",
-                    time=now_utc.isoformat().replace("+00:00", "Z"),
-                    saxo_client=saxo_client
-                )
-                container["bars"] = bars_container.get("bars", [])
-            except Exception as e:
-                logger.error(f"Failed to fetch bars for {symbol}: {e}")
-                # We can either skip or proceed without bars depending on strategy.
-                # Strict approach: skip
-                continue
+            if bars_req:
+                horizon, count = bars_req
+                try:
+                    bars_container = get_ohlc_bars(
+                        container,
+                        horizon_minutes=horizon,
+                        count=count,
+                        mode="UpTo",
+                        time=now_utc.isoformat().replace("+00:00", "Z"),
+                        saxo_client=saxo_client
+                    )
+                    container["bars"] = bars_container.get("bars", [])
+                except Exception as e:
+                    logger.error(f"Failed to fetch bars for {symbol}: {e}")
+                    continue
 
             valid_instruments[instrument_id] = container
 
@@ -502,11 +478,7 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
 
         # 4. Generate signals
         logger.info("Generating trading signals")
-        
-        # Instantiate strategy (using simple moving average for now)
-        strategy = get_strategy("moving_average")
         signals = strategy.generate_signals(valid_instruments, now_utc)
-
         logger.info(f"Generated {len(signals)} signals")
 
         # 5. Execute trades
@@ -518,10 +490,12 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
             account_key=config.account_key,
             client_key=config.client_key,
             config={
-                "duplicate_buy_policy": "block", # or "allow"
+                "duplicate_buy_policy": "block",
                 "allow_short_covering": True
             }
         )
+
+        trades_executed = 0
 
         for instrument_id, signal in signals.items():
             action = signal.action
@@ -530,120 +504,42 @@ def run_cycle(config: RuntimeConfig, saxo_client: SaxoClient, dry_run: bool = Fa
 
             logger.info(f"Processing signal for {instrument_id}: {action} ({signal.reason})")
 
-            # Map signal to intent
-            instrument = valid_instruments[instrument_id]
-            asset_type_str = instrument.get("asset_type")
-            uic = instrument.get("uic")
+            # Check Max Daily Trades (Early Exit within loop)
+            if action == "BUY" and (today_count + trades_executed) >= config.max_daily_trades:
+                 logger.warning("Skipping BUY: max_daily_trades limit hit during cycle")
+                 continue
 
-            # Validate asset type
-            try:
-                asset_type_enum = AssetType(asset_type_str)
-            except ValueError:
-                logger.error(f"Unknown asset type {asset_type_str} for {instrument_id}")
-                continue
-
-            # Sizing logic
-            quantity = 0.0
-            buy_sell = None
-
-            if action == "BUY":
-                buy_sell = BuySell.BUY
-                quantity = config.default_quantity
-
-                # Check 1: Max Positions
-                # Query all positions to count active ones
-                all_positions = executor.position_manager.get_positions()
-                if len(all_positions) >= config.max_positions:
-                    logger.warning(f"Ignored BUY signal for {instrument_id}: Max positions reached ({len(all_positions)} >= {config.max_positions})")
-                    continue
-
-                # Check 2: Max Daily Trades
-                current_daily_trades = load_daily_trade_count()
-                if current_daily_trades >= config.max_daily_trades:
-                    logger.warning(f"Ignored BUY signal for {instrument_id}: Max daily trades reached ({current_daily_trades} >= {config.max_daily_trades})")
-                    continue
-
-            elif action == "SELL":
-                buy_sell = BuySell.SELL
-                # For SELL, we need to know current position to close it
-                # Executor guards will handle blocking invalid sells, but we need an amount
-                # We query position manager to get current net quantity
-                positions = executor.position_manager.get_positions()
-                pos_key = (asset_type_str, str(uic))
-
-                # Note: position_manager keys might be (asset_type, uic) or similar.
-                # Checking SaxoPositionManager implementation would be good but standardizing here:
-                # position_manager.get_positions returns dict keyed by (AssetType, Uic) usually
-
-                # Actually SaxoPositionManager returns dict keyed by something.
-                # Let's trust position manager for now or use a safe "close all" flag if available.
-                # OrderIntent requires specific amount.
-
-                # We'll use a simplified approach: fetch position for this instrument
-                current_pos = positions.get(f"{asset_type_str}:{uic}") # Check key format if needed
-
-                # If using standard key format from position module...
-                # Let's assume we can get it.
-                # If not found, skip sell
-                # Wait, PositionManager usually keys by something specific.
-                # Let's assume executor handles "close position" if we pass specific flag?
-                # No, OrderIntent needs amount.
-
-                # FALLBACK: For now, if we can't find position, we might skip.
-                # But to implement "close existing", we really need that position size.
-                # Let's use a safe default or skip if we can't determine.
-
-                # Re-reading plan: "close existing long position by querying executor’s position_manager"
-                # "pos = position_manager.get_positions().get((asset_type, uic))"
-
-                # Let's verify PositionManager key format quickly or try to find it.
-                # Assuming (asset_type, uic) tuple or string key.
-                # The PositionManager uses `_get_position_key(asset_type, uic)`
-
-                # Let's try to find the position
-                target_key = f"{asset_type_str}:{uic}" # Common format
-                # OR
-                # We iterate
-                found_pos = None
-                for k, p in positions.items():
-                    if p.uic == uic and p.asset_type == asset_type_str:
-                        found_pos = p
-                        break
-
-                if found_pos:
-                    quantity = found_pos.net_quantity
-                else:
-                    logger.warning(f"Ignored SELL signal for {instrument_id}: No open position found")
-                    continue
-
-            if quantity <= 0:
-                logger.warning(f"Ignored signal for {instrument_id}: Quantity {quantity} <= 0")
-                continue
-
-            # Create Intent
-            intent = OrderIntent(
-                buy_sell=buy_sell,
-                asset_type=asset_type_enum,
-                uic=uic,
-                amount=quantity,
-                strategy_id="moving_average", # Hardcoded for now
-                client_key=config.client_key,
-                account_key=config.account_key
+            # Map to Intent
+            intent = signal_to_intent(
+                signal,
+                valid_instruments[instrument_id],
+                config,
+                executor.position_manager
             )
+
+            if not intent:
+                logger.warning(f"Could not map signal to intent for {instrument_id} (e.g. invalid position lookup)")
+                continue
 
             # Execute
             result = executor.execute(intent, dry_run=dry_run)
 
-            # Post-execution: Increment trade counter if successful (or dry-run success)
+            # Update counter on success
             if result.status in [ExecutionStatus.SUCCESS, ExecutionStatus.DRY_RUN]:
-                # Only increment for new orders (BUY/SELL)
-                new_count = increment_daily_trade_count()
-                logger.info(f"Daily trade count incremented to {new_count}")
+                # Increment for BUYs (and potentially SELLs if that's the policy)
+                # Assuming simple trade count
+                trades_executed += 1
+                counter.increment_today(daily_counts, 1)
 
             logger.info(f"Execution result for {instrument_id}: {result.status.value} - {result.error_message or 'Success'}")
 
-            # JSONL Logging (Story 006-006)
+            # JSONL Logging
             log_execution_jsonl(instrument_id, signal, intent, result)
+
+        # Persist counter updates
+        if trades_executed > 0:
+            counter.persist_atomic(daily_counts)
+            logger.info(f"Persisted {trades_executed} new trades to counter")
 
         logger.info("Cycle complete")
         

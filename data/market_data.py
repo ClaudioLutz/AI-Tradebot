@@ -454,9 +454,10 @@ def discover_watchlist_instruments(symbols: List[Dict[str, str]]) -> List[Dict[s
 
 def get_latest_quotes(
     instruments: List[Dict[str, Any]],
+    *,
+    saxo_client: SaxoClient,
     field_groups: Optional[str] = None,
     include_rate_limit_info: bool = False,
-    saxo_client: Optional[SaxoClient] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Fetch latest quote snapshots for instruments (prefer batched InfoPrices list).
 
@@ -469,7 +470,7 @@ def get_latest_quotes(
     `rate_limit_info` for the request that produced it (or empty dict for invalid inputs).
     """
 
-    client = saxo_client if saxo_client else SaxoClient()
+    client = saxo_client
 
     # Group instruments by asset_type
     grouped: Dict[str, List[Dict[str, Any]]] = {}
@@ -710,13 +711,14 @@ def _validate_count(count: int):
 def get_ohlc_bars(
     instrument: Dict[str, Any],
     horizon_minutes: int,
+    *,
+    saxo_client: SaxoClient,
     count: int = 60,
     mode: Literal["UpTo", "From"] = "UpTo",
     time: Optional[str] = None,
     field_groups: Optional[str] = None,
     existing_bars: Optional[List[Dict[str, Any]]] = None,
     include_rate_limit_info: bool = False,
-    saxo_client: Optional[SaxoClient] = None,
 ) -> Dict[str, Any]:
     """Fetch OHLC bars for a single instrument using Saxo Chart v3.
 
@@ -727,7 +729,7 @@ def get_ohlc_bars(
     Returns a container with instrument metadata and normalized bars.
     """
 
-    client = saxo_client if saxo_client else SaxoClient()
+    client = saxo_client
 
     asset_type = instrument.get("asset_type")
     uic = instrument.get("uic")

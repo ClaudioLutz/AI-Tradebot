@@ -68,6 +68,8 @@ class OrderIntent:
         """Validate critical constraints"""
         if len(self.external_reference) > 50:
             raise ValueError(f"external_reference must be <= 50 chars, got {len(self.external_reference)}")
+        if not isinstance(self.amount, Decimal):
+            raise TypeError(f"OrderIntent.amount must be Decimal, got {type(self.amount)}")
         if self.amount <= 0:
             raise ValueError(f"amount must be positive, got {self.amount}")
 
