@@ -9,7 +9,7 @@ We mock SaxoClient.get_with_headers to simulate Saxo endpoint responses.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import pytest
 
@@ -97,8 +97,10 @@ def test_get_latest_quotes_partial_omission_missing_flag(instruments):
 
     rate = {"session": {"remaining": 100, "reset": 10}, "raw_headers": {"X-RateLimit-Session-Remaining": "100"}}
 
-    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_response, rate)):
-        result = get_latest_quotes(instruments, include_rate_limit_info=True)
+    mock_client = Mock()
+    mock_client.get_with_headers.return_value = (fake_response, rate)
+
+    result = get_latest_quotes(instruments, saxo_client=mock_client, include_rate_limit_info=True)
 
     assert "Stock:211" in result
     assert result["Stock:211"]["quote"]["mid"] == 1.5
@@ -141,17 +143,19 @@ def test_horizon_validation_accepts_supported_values():
 
     # minimal chart response
     fake_chart = {"Data": []}
+    mock_client = Mock()
+    mock_client.get_with_headers.return_value = (fake_chart, {})
 
-    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_chart, {})):
-        for h in SUPPORTED_HORIZON_MINUTES:
-            get_ohlc_bars(inst, horizon_minutes=h, count=1)
+    for h in SUPPORTED_HORIZON_MINUTES:
+        get_ohlc_bars(inst, saxo_client=mock_client, horizon_minutes=h, count=1)
 
 
 def test_horizon_validation_rejects_unsupported_value():
     inst = {"asset_type": "Stock", "uic": 211, "symbol": "AAPL"}
+    mock_client = Mock()
 
     with pytest.raises(ValueError) as exc:
-        get_ohlc_bars(inst, horizon_minutes=2, count=1)
+        get_ohlc_bars(inst, saxo_client=mock_client, horizon_minutes=2, count=1)
 
     assert "Unsupported Horizon=2" in str(exc.value)
 
@@ -165,10 +169,11 @@ def test_missing_bars_warning_and_returned_count(caplog):
             {"Time": "2025-12-13T08:30:00Z", "Open": 1.5, "High": 2.5, "Low": 1.0, "Close": 2.0},
         ]
     }
+    mock_client = Mock()
+    mock_client.get_with_headers.return_value = (fake_chart, {})
 
-    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_chart, {})):
-        with caplog.at_level("WARNING"):
-            out = get_ohlc_bars(inst, horizon_minutes=1, count=60)
+    with caplog.at_level("WARNING"):
+        out = get_ohlc_bars(inst, saxo_client=mock_client, horizon_minutes=1, count=60)
 
     assert len(out["bars"]) == 2
     assert out["requested_count"] == 60
@@ -215,9 +220,10 @@ def test_get_latest_quotes_invalid_instrument_emits_error_entry():
             }
         ]
     }
+    mock_client = Mock()
+    mock_client.get_with_headers.return_value = (fake_response, {})
 
-    with patch("data.market_data.SaxoClient.get_with_headers", return_value=(fake_response, {})):
-        result = get_latest_quotes(instruments)
+    result = get_latest_quotes(instruments, saxo_client=mock_client)
 
     # Valid key present
     assert "Stock:211" in result

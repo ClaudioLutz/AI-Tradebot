@@ -24,7 +24,7 @@ Key Features:
 
 import logging
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from strategies.base import BaseStrategy, Signal, get_current_timestamp, validate_decision_time_utc
 from strategies.indicators import (
@@ -60,6 +60,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         long_window: int = 20,
         threshold_bps: Optional[int] = None,
         cooldown_bars: Optional[int] = None,
+        horizon_minutes: int = 60,
         timestamp_provider=None,
     ):
         """
@@ -70,6 +71,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
             long_window: Long MA period (default 20)
             threshold_bps: Minimum MA separation in bps to trigger signal (optional)
             cooldown_bars: Minimum bars between trades to prevent churn (optional)
+            horizon_minutes: Bar timeframe in minutes (default 60)
             timestamp_provider: Optional callable for deterministic timestamps (testing/backtesting)
         
         Raises:
@@ -96,6 +98,7 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         self.long_window = long_window
         self.threshold_bps = threshold_bps
         self.cooldown_bars = cooldown_bars
+        self.horizon_minutes = horizon_minutes
         
         # Track last signal bar index per instrument for cooldown
         self._last_signal_bar_index: Dict[str, int] = {}
@@ -103,8 +106,15 @@ class MovingAverageCrossoverStrategy(BaseStrategy):
         logger.info(
             f"Initialized MovingAverageCrossoverStrategy: "
             f"short={short_window}, long={long_window}, "
-            f"threshold={threshold_bps}bps, cooldown={cooldown_bars}bars"
+            f"threshold={threshold_bps}bps, cooldown={cooldown_bars}bars, horizon={horizon_minutes}min"
         )
+
+    def requires_bars(self) -> bool:
+        return True
+
+    def bar_requirements(self) -> Tuple[int, int]:
+        # Needs at least long_window + 1 closed bars to compute crossover safely
+        return (self.horizon_minutes, self.long_window + 1)
     
     def generate_signals(
         self,

@@ -15,7 +15,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Literal, Optional
+from typing import Dict, Literal, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +188,16 @@ class BaseStrategy(ABC):
                 For deterministic testing: lambda: datetime(2025, 1, 15, tzinfo=timezone.utc)
         """
         self.timestamp_provider = timestamp_provider
+
+    def requires_bars(self) -> bool:
+        """Whether this strategy requires historical bars."""
+        return False
+
+    def bar_requirements(self) -> Optional[Tuple[int, int]]:
+        """
+        Returns (horizon_minutes, count) if bars are required.
+        """
+        return None
 
     @abstractmethod
     def generate_signals(

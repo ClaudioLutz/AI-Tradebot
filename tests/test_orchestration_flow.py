@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 import json
 import os
+from decimal import Decimal
 
 from main import run_cycle, log_execution_jsonl
 from config.runtime_config import RuntimeConfig
@@ -24,7 +25,7 @@ class TestOrchestrationFlow(unittest.TestCase):
             ],
             cycle_interval_seconds=60,
             trading_hours_mode="always",
-            default_quantity=10,
+            default_quantity=Decimal("10"),
             max_positions=5,
             max_daily_trades=10,
             max_position_size=1000,
@@ -60,6 +61,8 @@ class TestOrchestrationFlow(unittest.TestCase):
         # 2. Setup Strategy Mock
         mock_strategy = MagicMock()
         mock_get_strategy.return_value = mock_strategy
+        mock_strategy.requires_bars.return_value = True
+        mock_strategy.bar_requirements.return_value = (60, 60)
 
         now = datetime.now(timezone.utc)
         signal = Signal(
@@ -104,7 +107,7 @@ class TestOrchestrationFlow(unittest.TestCase):
         self.assertEqual(intent.buy_sell, BuySell.BUY)
         self.assertEqual(intent.asset_type, AssetType.STOCK)
         self.assertEqual(intent.uic, 211)
-        self.assertEqual(intent.amount, 10.0) # Default quantity
+        self.assertEqual(intent.amount, Decimal("10")) # Default quantity
 
     @patch("main.get_latest_quotes")
     @patch("main.get_strategy")
@@ -113,7 +116,9 @@ class TestOrchestrationFlow(unittest.TestCase):
         # Pre-fill trade counter
         os.makedirs("state", exist_ok=True)
         with open("state/trade_counter.json", "w") as f:
-            json.dump({"date": datetime.utcnow().date().isoformat(), "count": 10}, f)
+            # Use current UTC date
+            today = datetime.now(timezone.utc).date().isoformat()
+            json.dump({"date": today, "count": 10}, f)
 
         mock_get_quotes.return_value = {
             "Stock:211": {
@@ -135,6 +140,9 @@ class TestOrchestrationFlow(unittest.TestCase):
         run_cycle(self.mock_config, self.mock_client, dry_run=True)
 
         # Executor should NOT be called because max daily trades reached (10 >= 10)
+        # Wait, run_cycle checks daily trades at start now.
+        # But also checks inside the loop.
+        # If it returns early, execute is not called.
         mock_executor.execute.assert_not_called()
 
 if __name__ == '__main__':

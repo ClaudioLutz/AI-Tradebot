@@ -4,6 +4,7 @@ Central configuration for trading bot parameters.
 """
 import os
 import logging
+from decimal import Decimal
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -75,7 +76,7 @@ TIMEZONE = os.getenv("TIMEZONE", "America/New_York")  # Market timezone
 
 # Cycle Configuration
 CYCLE_INTERVAL_SECONDS = int(os.getenv("CYCLE_INTERVAL_SECONDS", "300"))  # 5 minutes default
-DEFAULT_QUANTITY = float(os.getenv("DEFAULT_QUANTITY", "1.0"))  # Default trade quantity
+DEFAULT_QUANTITY = Decimal(os.getenv("DEFAULT_QUANTITY", "1.0"))  # Default trade quantity
 
 # Scheduling (if using scheduler)
 TRADING_SCHEDULE = "09:30"  # Time to run trading logic (format: "HH:MM")

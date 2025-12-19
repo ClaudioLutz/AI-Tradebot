@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import Mock, patch
+from decimal import Decimal
 from execution.validation import InstrumentConstraints, InstrumentValidator
 from execution.models import OrderIntent, AssetType, BuySell, OrderType
 
@@ -58,7 +59,7 @@ def test_not_tradable_instrument():
         asset_type=AssetType.STOCK,
         uic=211,
         buy_sell=BuySell.BUY,
-        amount=100
+        amount=Decimal("100")
     )
 
     is_valid, error = validator.validate_order_intent(intent)
